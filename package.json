@@ -1,0 +1,11 @@
+{
+    "name": "resistance-app",
+    "private": true,
+    "scripts": {
+        "dev": "concurrently \"cd backend && npm run dev\" \"cd frontend && npm run dev\"",
+        "install:all": "cd backend && npm install && cd ../frontend && npm install"
+    },
+    "devDependencies": {
+        "concurrently": "^9.2.1"
+    }
+}
