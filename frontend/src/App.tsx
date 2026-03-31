@@ -4,8 +4,8 @@ import dayjs from 'dayjs'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   TrendingUp, TrendingDown, Clock, Activity, BarChart3, Database,
-  Shield, Zap, RefreshCw, Layers, Settings2, Play, Table, PieChart,
-  ChevronRight, AlertCircle, Info
+  Shield, Zap, RefreshCw, Layers, Settings2, Play, PieChart,
+  AlertCircle, Info
 } from 'lucide-react'
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
@@ -52,6 +52,12 @@ interface ApiResponse {
   data: Candle[]
 }
 
+interface Strategy {
+  id: string
+  name: string
+  description: string
+}
+
 const API_BASE_URL = 'http://localhost:5001/api'
 
 export default function App() {
@@ -62,18 +68,45 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false)
   const [pair, setPair] = useState('B-BTC_USDT')
 
-  const [rangeTime, setRangeTime] = useState('04:00')
-  const [cutoffTime, setCutoffTime] = useState('02:15')
-  const [buffer, setBuffer] = useState(2)
-  const [riskReward, setRiskReward] = useState(1.2)
+  const [selectedStrategyId, setSelectedStrategyId] = useState('opening-breakout')
+
+  // Common Backtest State
   const [initialCapital, setInitialCapital] = useState(1000)
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth())
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear())
   const [interval, setInterval] = useState('15')
+  const [isTestMode, setIsTestMode] = useState(false)
+
+  // Opening Breakout Specific State
+  const [rangeTime, setRangeTime] = useState('04:00')
+  const [cutoffTime, setCutoffTime] = useState('02:15')
+  const [buffer, setBuffer] = useState(2)
+  const [riskReward, setRiskReward] = useState(1.2)
   const [useTrailingSL, setUseTrailingSL] = useState(false)
+
+  // MA Crossover Specific State
+  const [shortPeriod, setShortPeriod] = useState(9)
+  const [longPeriod, setLongPeriod] = useState(21)
+
   const [backtestResult, setBacktestResult] = useState<BacktestResponse | null>(null)
   const [isBacktesting, setIsBacktesting] = useState(false)
-  const [isTestMode, setIsTestMode] = useState(false)
+  const [strategies, setStrategies] = useState<Strategy[]>([])
+
+  const fetchStrategies = async () => {
+    try {
+      const response = await axios.get<Strategy[]>(`${API_BASE_URL}/strategies`)
+      setStrategies(response.data)
+      if (response.data.length > 0) {
+        setSelectedStrategyId(response.data[0].id)
+      }
+    } catch (err) {
+      console.error('Failed to fetch strategies:', err)
+    }
+  }
+
+  useEffect(() => {
+    fetchStrategies()
+  }, [])
 
   const fetchMarketData = async () => {
     try {
@@ -105,20 +138,33 @@ export default function App() {
       const [rHour, rMin] = rangeTime.split(':').map(Number)
       const [cHour, cMin] = cutoffTime.split(':').map(Number)
 
+      let strategyParams: any = {}
+      if (selectedStrategyId === 'opening-breakout') {
+        strategyParams = {
+          rangeHour: rHour,
+          rangeMinute: rMin,
+          cutoffHour: cHour,
+          cutoffMinute: cMin,
+          buffer,
+          riskReward,
+          useTrailingSL
+        }
+      } else if (selectedStrategyId === 'ma-crossover') {
+        strategyParams = {
+          shortPeriod,
+          longPeriod
+        }
+      }
+
       const response = await axios.post<BacktestResponse>(`${API_BASE_URL}/backtest`, {
         pair,
         resolution: interval,
-        rangeHour: rHour,
-        rangeMinute: rMin,
-        cutoffHour: cHour,
-        cutoffMinute: cMin,
-        buffer,
-        riskReward,
+        strategyId: selectedStrategyId,
         month: selectedMonth,
         year: selectedYear,
         initialCapital,
-        useTrailingSL,
-        isTest: isTestMode
+        isTest: isTestMode,
+        ...strategyParams
       })
       setBacktestResult(response.data)
       setView('backtest')
@@ -210,7 +256,7 @@ export default function App() {
                 </div>
 
                 <div className="flex items-center gap-3 bg-slate-900/40 p-1.5 rounded-2xl border border-white/5">
-                  {['B-BTC_USDT', 'B-ETH_USDT', 'B-SOL_USDT'].map((p) => (
+                  {['B-BTC_USDT', 'B-ETH_USDT', 'B-SOL_USDT', 'XAUT_USDT'].map((p) => (
                     <button
                       key={p}
                       onClick={() => setPair(p)}
@@ -221,7 +267,7 @@ export default function App() {
                           : "text-slate-500 hover:text-slate-200 hover:bg-white/5"
                       )}
                     >
-                      {p.split('-')[1]}
+                      {p.includes('-') ? p.split('-')[1] : p}
                     </button>
                   ))}
                 </div>
@@ -303,28 +349,31 @@ export default function App() {
                   <div className="p-2 rounded-xl bg-blue-600/20 border border-blue-500/20">
                     <Settings2 className="w-6 h-6 text-blue-400" />
                   </div>
-                  <h2 className="text-xl font-black tracking-tight">Setup Parameters</h2>
+                  <h2 className="text-xl font-black tracking-tight">Configuration</h2>
+                </div>
+
+                <div className="flex bg-slate-950/50 p-1 rounded-2xl border border-white/5 mb-8">
+                  {strategies.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => {
+                        setSelectedStrategyId(s.id);
+                        setBacktestResult(null);
+                      }}
+                      className={cn(
+                        "flex-1 py-3 px-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                        selectedStrategyId === s.id
+                          ? "bg-blue-600 text-white shadow-lg"
+                          : "text-slate-500 hover:text-slate-300"
+                      )}
+                    >
+                      {s.name}
+                    </button>
+                  ))}
                 </div>
 
                 <div className="space-y-6">
-                  <InputGroup label="Range Start Time" sub="Set the definition hour for daily range">
-                    <input
-                      type="time"
-                      value={rangeTime}
-                      onChange={(e) => setRangeTime(e.target.value)}
-                      className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold focus:border-blue-500/50 outline-none transition-all"
-                    />
-                  </InputGroup>
-
-                  <InputGroup label="Cutoff Time" sub="Daily trade closure forced at this hour">
-                    <input
-                      type="time"
-                      value={cutoffTime}
-                      onChange={(e) => setCutoffTime(e.target.value)}
-                      className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold focus:border-blue-500/50 outline-none transition-all"
-                    />
-                  </InputGroup>
-
+                  {/* Common Strategy Fields */}
                   <div className="grid grid-cols-2 gap-4">
                     <InputGroup label="Year" sub="Target year">
                       <select
@@ -368,38 +417,95 @@ export default function App() {
                     </InputGroup>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <InputGroup label="Buffer ($)" sub="Breakout threshold">
-                      <input
-                        type="number"
-                        value={buffer}
-                        onChange={(e) => setBuffer(Number(e.target.value))}
-                        className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
-                      />
-                    </InputGroup>
-                    <InputGroup label="Risk Reward" sub="Target multiplier">
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={riskReward}
-                        onChange={(e) => setRiskReward(Number(e.target.value))}
-                        className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
-                      />
-                    </InputGroup>
-                  </div>
+                  {/* Strategy Specific Fields */}
+                  <div className="h-px w-full bg-white/5 my-2" />
 
-                  <div className="flex items-center gap-3 px-2 py-2">
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={useTrailingSL}
-                        onChange={(e) => setUseTrailingSL(e.target.checked)}
-                        className="sr-only peer"
-                      />
-                      <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                      <span className="ml-3 text-sm font-bold text-slate-300">Enable Trailing Stop Loss</span>
-                    </label>
-                  </div>
+                  {selectedStrategyId === 'opening-breakout' && (
+                    <motion.div
+                      key="opening-breakout"
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className="space-y-6"
+                    >
+                      <InputGroup label="Range Start Time" sub="Set the definition hour for daily range">
+                        <input
+                          type="time"
+                          value={rangeTime}
+                          onChange={(e) => setRangeTime(e.target.value)}
+                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold focus:border-blue-500/50 outline-none transition-all"
+                        />
+                      </InputGroup>
+
+                      <InputGroup label="Cutoff Time" sub="Daily trade closure forced at this hour">
+                        <input
+                          type="time"
+                          value={cutoffTime}
+                          onChange={(e) => setCutoffTime(e.target.value)}
+                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold focus:border-blue-500/50 outline-none transition-all"
+                        />
+                      </InputGroup>
+
+                      <div className="grid grid-cols-2 gap-4">
+                        <InputGroup label="Buffer ($)" sub="Breakout threshold">
+                          <input
+                            type="number"
+                            value={buffer}
+                            onChange={(e) => setBuffer(Number(e.target.value))}
+                            className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
+                          />
+                        </InputGroup>
+                        <InputGroup label="Risk Reward" sub="Target multiplier">
+                          <input
+                            type="number"
+                            step="0.1"
+                            value={riskReward}
+                            onChange={(e) => setRiskReward(Number(e.target.value))}
+                            className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
+                          />
+                        </InputGroup>
+                      </div>
+
+                      <div className="flex items-center gap-3 px-2 py-2">
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={useTrailingSL}
+                            onChange={(e) => setUseTrailingSL(e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                          <span className="ml-3 text-sm font-bold text-slate-300">Enable Trailing SL</span>
+                        </label>
+                      </div>
+                    </motion.div>
+                  )}
+
+                  {selectedStrategyId === 'ma-crossover' && (
+                    <motion.div
+                      key="ma-crossover"
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className="space-y-6"
+                    >
+                      <InputGroup label="Short Period" sub="Lookback for fast MA">
+                        <input
+                          type="number"
+                          value={shortPeriod}
+                          onChange={(e) => setShortPeriod(Number(e.target.value))}
+                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold focus:border-blue-500/50 outline-none transition-all"
+                        />
+                      </InputGroup>
+
+                      <InputGroup label="Long Period" sub="Lookback for slow MA">
+                        <input
+                          type="number"
+                          value={longPeriod}
+                          onChange={(e) => setLongPeriod(Number(e.target.value))}
+                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold focus:border-blue-500/50 outline-none transition-all"
+                        />
+                      </InputGroup>
+                    </motion.div>
+                  )}
 
                   <button
                     onClick={runBacktest}
