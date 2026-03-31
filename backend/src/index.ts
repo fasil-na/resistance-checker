@@ -6,6 +6,8 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 
+import dummyData from './data/dummy_15m.json' with { type: 'json' };
+
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
@@ -26,7 +28,12 @@ app.get('/api/health', (_req: Request, res: Response) => {
 
 app.get('/api/market-data', async (req: Request, res: Response) => {
     try {
-        const { pair = 'B-BTC_USDT', resolution = '60', from, to } = req.query;
+        const { pair = 'B-BTC_USDT', resolution = '60', from, to, isTest } = req.query;
+
+        if (isTest === 'true') {
+            return res.json(dummyData);
+        }
+
         const now = Math.floor(Date.now() / 1000);
         const yesterday = now - (24 * 60 * 60);
 
@@ -47,6 +54,7 @@ app.get('/api/market-data', async (req: Request, res: Response) => {
 });
 
 interface Trade {
+    breakoutTime: string
     entryTime: string
     exitTime?: string
     direction: 'buy' | 'sell'
@@ -59,6 +67,7 @@ interface Trade {
     lastHigh?: number | undefined
     lastLow?: number | undefined
     initialRisk?: number | undefined
+    exitReason?: 'TP' | 'SL' | 'Cutoff' | 'DayReset' | 'Manual'
 }
 
 app.post('/api/backtest', async (req: Request, res: Response) => {
@@ -77,36 +86,42 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
             cutoffMinute = 15,
             buffer = 2,
             riskReward = 1.2,
-            useTrailingSL = false
+            useTrailingSL = false,
+            isTest = false
         } = req.body;
 
-        let startUnix: number;
-        let endUnix: number;
+        let candles: any[];
 
-        if (year !== undefined && month !== undefined) {
-            const startOfMonth = dayjs().year(year).month(month).startOf('month');
-            const endOfMonth = dayjs().year(year).month(month).endOf('month');
-            startUnix = Math.floor(startOfMonth.valueOf() / 1000);
-            endUnix = Math.floor(endOfMonth.valueOf() / 1000);
+        if (isTest) {
+            candles = [...dummyData.data].sort((a: any, b: any) => a.time - b.time);
         } else {
-            startUnix = from || Math.floor(Date.now() / 1000) - (7 * 24 * 60 * 60);
-            endUnix = to || Math.floor(Date.now() / 1000);
+            let startUnix: number;
+            let endUnix: number;
+
+            if (year !== undefined && month !== undefined) {
+                const startOfMonth = dayjs().year(year).month(month).startOf('month');
+                const endOfMonth = dayjs().year(year).month(month).endOf('month');
+                startUnix = Math.floor(startOfMonth.valueOf() / 1000);
+                endUnix = Math.floor(endOfMonth.valueOf() / 1000);
+            } else {
+                startUnix = from || Math.floor(Date.now() / 1000) - (7 * 24 * 60 * 60);
+                endUnix = to || Math.floor(Date.now() / 1000);
+            }
+
+            const params = {
+                pair,
+                from: startUnix,
+                to: endUnix,
+                resolution,
+                pcode: 'f'
+            };
+
+            const response = await axios.get(COINDCX_URL, { params });
+            if (response.data.s !== 'ok') {
+                return res.status(400).json({ error: 'Invalid market data' });
+            }
+            candles = response.data.data.sort((a: any, b: any) => a.time - b.time);
         }
-
-        const params = {
-            pair,
-            from: startUnix,
-            to: endUnix,
-            resolution,
-            pcode: 'f'
-        };
-
-        const response = await axios.get(COINDCX_URL, { params });
-        if (response.data.s !== 'ok') {
-            return res.status(400).json({ error: 'Invalid market data' });
-        }
-
-        const candles = response.data.data.sort((a: any, b: any) => a.time - b.time);
 
         let trades: Trade[] = [];
         let currentTrade: Trade | null = null;
@@ -117,7 +132,7 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
         let breakCandleLow: number | null = null;
         let waitingForWickBreak = false;
         let breakoutDirection: 'buy' | 'sell' | null = null;
-        let breakoutTime: number | null = null;
+        let breakoutTimeStr: string | null = null;
         let priceReturnedToRange = false;
 
         for (let i = 2; i < candles.length; i++) {
@@ -136,6 +151,7 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
                     currentTrade.exitTime = time.toISOString();
                     currentTrade.profit = currentTrade.direction === 'buy' ? currentTrade.exitPrice! - currentTrade.entryPrice : currentTrade.entryPrice - currentTrade.exitPrice!;
                     currentTrade.status = 'closed';
+                    currentTrade.exitReason = 'DayReset';
                     trades.push(currentTrade);
                     currentTrade = null;
                 }
@@ -146,7 +162,7 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
                 waitingForWickBreak = false;
                 breakoutDirection = null;
                 priceReturnedToRange = false;
-                breakoutTime = null;
+                breakoutTimeStr = null;
             }
 
             // --- CUTOFF ---
@@ -156,6 +172,7 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
                     currentTrade.exitTime = time.toISOString();
                     currentTrade.profit = currentTrade.direction === 'buy' ? currentTrade.exitPrice! - currentTrade.entryPrice : currentTrade.entryPrice - currentTrade.exitPrice!;
                     currentTrade.status = 'closed';
+                    currentTrade.exitReason = 'Cutoff';
                     trades.push(currentTrade);
                     currentTrade = null;
                 }
@@ -177,17 +194,21 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
                     if (candle.low <= currentTrade.sl!) {
                         currentTrade.exitPrice = currentTrade.sl;
                         currentTrade.status = 'closed';
+                        currentTrade.exitReason = 'SL';
                     } else if (candle.high >= currentTrade.tp! && !useTrailingSL) {
                         currentTrade.exitPrice = currentTrade.tp;
                         currentTrade.status = 'closed';
+                        currentTrade.exitReason = 'TP';
                     }
                 } else {
                     if (candle.high >= currentTrade.sl!) {
                         currentTrade.exitPrice = currentTrade.sl;
                         currentTrade.status = 'closed';
+                        currentTrade.exitReason = 'SL';
                     } else if (candle.low <= currentTrade.tp! && !useTrailingSL) {
                         currentTrade.exitPrice = currentTrade.tp;
                         currentTrade.status = 'closed';
+                        currentTrade.exitReason = 'TP';
                     }
                 }
 
@@ -228,26 +249,30 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
             if (!waitingForWickBreak) {
                 if (!priceReturnedToRange) continue;
 
+                const brkBody = Math.abs(candle.close - candle.open);
+                const brkRange = candle.high - candle.low;
+                if (brkRange === 0 || (brkBody / brkRange) < 0.5) continue;
+
                 if (candle.close > rangeHigh + buffer) {
                     breakoutDirection = 'buy';
                     breakCandleHigh = candle.high;
                     breakCandleLow = candle.low;
                     waitingForWickBreak = true;
                     priceReturnedToRange = false;
-                    breakoutTime = candle.time;
+                    breakoutTimeStr = dayjs(candle.time).tz('Asia/Kolkata').toISOString();
                 } else if (candle.close < rangeLow - buffer) {
                     breakoutDirection = 'sell';
                     breakCandleHigh = candle.high;
                     breakCandleLow = candle.low;
                     waitingForWickBreak = true;
                     priceReturnedToRange = false;
-                    breakoutTime = candle.time;
+                    breakoutTimeStr = dayjs(candle.time).tz('Asia/Kolkata').toISOString();
                 }
             }
             // --- STEP 2: NEXT CANDLE ENTRY ---
             else if (waitingForWickBreak) {
                 const resInMs = parseInt(resolution) * 60 * 1000;
-                if (candle.time > breakoutTime! + resInMs) {
+                if (candle.time > dayjs(breakoutTimeStr).valueOf() + resInMs) {
                     waitingForWickBreak = false;
                     continue;
                 }
@@ -266,6 +291,7 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
                     const sl = breakCandleLow! - buffer;
                     const risk = breakCandleHigh! - sl;
                     currentTrade = {
+                        breakoutTime: breakoutTimeStr!,
                         entryTime: time.toISOString(),
                         direction: 'buy',
                         entryPrice: breakCandleHigh!,
@@ -282,6 +308,7 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
                     const sl = breakCandleHigh! + buffer;
                     const risk = sl - breakCandleLow!;
                     currentTrade = {
+                        breakoutTime: breakoutTimeStr!,
                         entryTime: time.toISOString(),
                         direction: 'sell',
                         entryPrice: breakCandleLow!,
@@ -296,6 +323,18 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
                     waitingForWickBreak = false;
                 }
             }
+        }
+
+        // Close any remaining open trade at the end of the data stream
+        if (currentTrade) {
+            const lastCandle = candles[candles.length - 1];
+            currentTrade.exitPrice = lastCandle.close;
+            currentTrade.exitTime = dayjs(lastCandle.time).tz('Asia/Kolkata').toISOString();
+            currentTrade.profit = currentTrade.direction === 'buy' ? currentTrade.exitPrice! - currentTrade.entryPrice : currentTrade.entryPrice - currentTrade.exitPrice!;
+            currentTrade.status = 'closed';
+            currentTrade.exitReason = 'DayReset';
+            trades.push(currentTrade);
+            currentTrade = null;
         }
 
         const stats = {

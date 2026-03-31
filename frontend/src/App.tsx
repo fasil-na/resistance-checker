@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react'
 import axios from 'axios'
+import dayjs from 'dayjs'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   TrendingUp, TrendingDown, Clock, Activity, BarChart3, Database,
@@ -23,6 +24,7 @@ interface Candle {
 }
 
 interface Trade {
+  breakoutTime: string
   entryTime: string
   exitTime?: string
   direction: 'buy' | 'sell'
@@ -30,6 +32,7 @@ interface Trade {
   exitPrice?: number
   profit: number
   status: 'open' | 'closed'
+  exitReason?: string
 }
 
 interface BacktestResponse {
@@ -70,6 +73,7 @@ export default function App() {
   const [useTrailingSL, setUseTrailingSL] = useState(false)
   const [backtestResult, setBacktestResult] = useState<BacktestResponse | null>(null)
   const [isBacktesting, setIsBacktesting] = useState(false)
+  const [isTestMode, setIsTestMode] = useState(false)
 
   const fetchMarketData = async () => {
     try {
@@ -77,7 +81,8 @@ export default function App() {
       const response = await axios.get<ApiResponse>(`${API_BASE_URL}/market-data`, {
         params: {
           pair,
-          resolution: '60'
+          resolution: '60',
+          isTest: isTestMode
         }
       })
       if (response.data.s === 'ok') {
@@ -112,7 +117,8 @@ export default function App() {
         month: selectedMonth,
         year: selectedYear,
         initialCapital,
-        useTrailingSL
+        useTrailingSL,
+        isTest: isTestMode
       })
       setBacktestResult(response.data)
       setView('backtest')
@@ -125,7 +131,7 @@ export default function App() {
 
   useEffect(() => {
     fetchMarketData()
-  }, [pair])
+  }, [pair, isTestMode])
 
   const stats = useMemo(() => {
     if (candles.length === 0) return { avgPrice: 0, maxHigh: 0, minLow: 0, totalVolume: 0 }
@@ -189,21 +195,36 @@ export default function App() {
                 </h1>
               </div>
 
-              <div className="flex items-center gap-3 bg-slate-900/40 p-1.5 rounded-2xl border border-white/5">
-                {['B-BTC_USDT', 'B-ETH_USDT', 'B-SOL_USDT'].map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => setPair(p)}
-                    className={cn(
-                      "px-5 py-2.5 rounded-xl text-xs font-black transition-all",
-                      pair === p
-                        ? "bg-blue-600 text-white shadow-xl shadow-blue-600/20"
-                        : "text-slate-500 hover:text-slate-200 hover:bg-white/5"
-                    )}
-                  >
-                    {p.split('-')[1]}
-                  </button>
-                ))}
+              <div className="flex items-center gap-6">
+                <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 px-4 py-2.5 rounded-2xl">
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isTestMode}
+                      onChange={(e) => setIsTestMode(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-200 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-500"></div>
+                    <span className="ml-3 text-[10px] font-black text-rose-400 uppercase tracking-widest">Test Mode</span>
+                  </label>
+                </div>
+
+                <div className="flex items-center gap-3 bg-slate-900/40 p-1.5 rounded-2xl border border-white/5">
+                  {['B-BTC_USDT', 'B-ETH_USDT', 'B-SOL_USDT'].map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPair(p)}
+                      className={cn(
+                        "px-5 py-2.5 rounded-xl text-xs font-black transition-all",
+                        pair === p
+                          ? "bg-blue-600 text-white shadow-xl shadow-blue-600/20"
+                          : "text-slate-500 hover:text-slate-200 hover:bg-white/5"
+                      )}
+                    >
+                      {p.split('-')[1]}
+                    </button>
+                  ))}
+                </div>
               </div>
             </header>
 
@@ -459,7 +480,32 @@ export default function App() {
                                   </div>
                                   <div>
                                     <div className="text-sm font-bold text-white capitalize">{trade.direction} Position</div>
-                                    <div className="text-[10px] text-slate-600 font-medium">{new Date(trade.entryTime).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
+                                    <div className="flex flex-col gap-1 mt-1">
+                                      <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-tighter">
+                                        <span className="text-slate-600 w-12 text-right">Breakout:</span>
+                                        <span className="text-amber-500/80">{dayjs(trade.breakoutTime).format('MMM DD HH:mm')}</span>
+                                      </div>
+                                      <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-tighter">
+                                        <span className="text-slate-600 w-12 text-right">Entry:</span>
+                                        <span className="text-blue-400">{dayjs(trade.entryTime).format('MMM DD HH:mm')}</span>
+                                      </div>
+                                      <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-tighter">
+                                        <span className="text-slate-600 w-12 text-right">Exit:</span>
+                                        <span className="text-rose-400">{trade.exitTime ? dayjs(trade.exitTime).format('MMM DD HH:mm') : '---'}</span>
+                                      </div>
+                                      {trade.exitReason && (
+                                        <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-tighter">
+                                          <span className="text-slate-600 w-12 text-right">Reason:</span>
+                                          <span className={cn(
+                                            trade.exitReason === 'TP' ? "text-emerald-400" :
+                                              trade.exitReason === 'SL' ? "text-rose-400" :
+                                                "text-slate-400"
+                                          )}>
+                                            {trade.exitReason}
+                                          </span>
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
                               </td>
