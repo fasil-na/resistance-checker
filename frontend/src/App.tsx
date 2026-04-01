@@ -1,11 +1,12 @@
-import { useEffect, useState, useMemo } from 'react'
+import React, { useEffect, useState, useMemo, useRef } from 'react'
 import axios from 'axios'
 import dayjs from 'dayjs'
 import { motion, AnimatePresence } from 'framer-motion'
+import { createChart, ColorType, CandlestickSeries, LineStyle } from 'lightweight-charts'
 import {
   TrendingUp, TrendingDown, Clock, Activity, BarChart3, Database,
   Shield, Zap, RefreshCw, Layers, Settings2, Play, PieChart,
-  AlertCircle, Info
+  AlertCircle, Info, Eye, X
 } from 'lucide-react'
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
@@ -24,7 +25,9 @@ interface Candle {
 }
 
 interface Trade {
-  breakoutTime: string
+  rangeHigh?: number
+  rangeLow?: number
+  breakoutTime?: string
   entryTime: string
   exitTime?: string
   direction: 'buy' | 'sell'
@@ -33,6 +36,7 @@ interface Trade {
   profit: number
   status: 'open' | 'closed'
   exitReason?: string
+  units?: number
 }
 
 interface BacktestResponse {
@@ -75,14 +79,7 @@ export default function App() {
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth())
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear())
   const [interval, setInterval] = useState('15')
-  const [isTestMode, setIsTestMode] = useState(false)
-
-  // Opening Breakout Specific State
-  const [rangeTime, setRangeTime] = useState('04:00')
-  const [cutoffTime, setCutoffTime] = useState('02:15')
-  const [buffer, setBuffer] = useState(2)
-  const [riskReward, setRiskReward] = useState(1.2)
-  const [useTrailingSL, setUseTrailingSL] = useState(false)
+  const [isLiveMonitoring, setIsLiveMonitoring] = useState(false)
 
   // MA Crossover Specific State
   const [shortPeriod, setShortPeriod] = useState(9)
@@ -91,6 +88,7 @@ export default function App() {
   const [backtestResult, setBacktestResult] = useState<BacktestResponse | null>(null)
   const [isBacktesting, setIsBacktesting] = useState(false)
   const [strategies, setStrategies] = useState<Strategy[]>([])
+  const [selectedTradeForView, setSelectedTradeForView] = useState<Trade | null>(null)
 
   const fetchStrategies = async () => {
     try {
@@ -115,7 +113,7 @@ export default function App() {
         params: {
           pair,
           resolution: '60',
-          isTest: isTestMode
+          isTest: isLiveMonitoring
         }
       })
       if (response.data.s === 'ok') {
@@ -135,20 +133,9 @@ export default function App() {
   const runBacktest = async () => {
     try {
       setIsBacktesting(true)
-      const [rHour, rMin] = rangeTime.split(':').map(Number)
-      const [cHour, cMin] = cutoffTime.split(':').map(Number)
-
       let strategyParams: any = {}
       if (selectedStrategyId === 'opening-breakout') {
-        strategyParams = {
-          rangeHour: rHour,
-          rangeMinute: rMin,
-          cutoffHour: cHour,
-          cutoffMinute: cMin,
-          buffer,
-          riskReward,
-          useTrailingSL
-        }
+        strategyParams = {}
       } else if (selectedStrategyId === 'ma-crossover') {
         strategyParams = {
           shortPeriod,
@@ -162,8 +149,8 @@ export default function App() {
         strategyId: selectedStrategyId,
         month: selectedMonth,
         year: selectedYear,
-        initialCapital,
-        isTest: isTestMode,
+        capitalPerTrade: initialCapital,
+        isLive: isLiveMonitoring,
         ...strategyParams
       })
       setBacktestResult(response.data)
@@ -177,7 +164,20 @@ export default function App() {
 
   useEffect(() => {
     fetchMarketData()
-  }, [pair, isTestMode])
+  }, [pair, isLiveMonitoring])
+
+  const tradesByDay = useMemo(() => {
+    if (!backtestResult) return {}
+    return backtestResult.trades.reduce((acc, trade) => {
+      const day = dayjs(trade.entryTime).format('YYYY-MM-DD')
+      if (!acc[day]) acc[day] = { trades: [], profit: 0, success: 0, failure: 0 }
+      acc[day].trades.push(trade)
+      acc[day].profit += trade.profit
+      if (trade.profit > 0) acc[day].success++
+      else acc[day].failure++
+      return acc
+    }, {} as Record<string, { trades: Trade[], profit: number, success: number, failure: number }>)
+  }, [backtestResult])
 
   const stats = useMemo(() => {
     if (candles.length === 0) return { avgPrice: 0, maxHigh: 0, minLow: 0, totalVolume: 0 }
@@ -191,6 +191,17 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-blue-500/30">
       {/* Background decoration */}
+      <AnimatePresence>
+        {selectedTradeForView && (
+          <TradeViewModal
+            trade={selectedTradeForView}
+            pair={pair}
+            resolution={interval}
+            isLiveMonitoring={isLiveMonitoring}
+            onClose={() => setSelectedTradeForView(null)}
+          />
+        )}
+      </AnimatePresence>
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-[-10%] left-[-5%] w-[40%] h-[40%] rounded-full bg-blue-600/10 blur-[120px]" />
         <div className="absolute bottom-[-10%] right-[-5%] w-[40%] h-[40%] rounded-full bg-indigo-600/10 blur-[120px]" />
@@ -242,16 +253,16 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-6">
-                <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 px-4 py-2.5 rounded-2xl">
+                <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 px-4 py-2.5 rounded-2xl">
                   <label className="relative inline-flex items-center cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={isTestMode}
-                      onChange={(e) => setIsTestMode(e.target.checked)}
+                      checked={isLiveMonitoring}
+                      onChange={(e) => setIsLiveMonitoring(e.target.checked)}
                       className="sr-only peer"
                     />
-                    <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-200 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-500"></div>
-                    <span className="ml-3 text-[10px] font-black text-rose-400 uppercase tracking-widest">Test Mode</span>
+                    <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-200 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
+                    <span className="ml-3 text-[10px] font-black text-emerald-400 uppercase tracking-widest">Live Monitoring</span>
                   </label>
                 </div>
 
@@ -374,28 +385,30 @@ export default function App() {
 
                 <div className="space-y-6">
                   {/* Common Strategy Fields */}
-                  <div className="grid grid-cols-2 gap-4">
-                    <InputGroup label="Year" sub="Target year">
-                      <select
-                        value={selectedYear}
-                        onChange={(e) => setSelectedYear(Number(e.target.value))}
-                        className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
-                      >
-                        {[2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
-                      </select>
-                    </InputGroup>
-                    <InputGroup label="Month" sub="Target month">
-                      <select
-                        value={selectedMonth}
-                        onChange={(e) => setSelectedMonth(Number(e.target.value))}
-                        className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
-                      >
-                        {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].map((m, i) => (
-                          <option key={m} value={i}>{m}</option>
-                        ))}
-                      </select>
-                    </InputGroup>
-                  </div>
+                  {!isLiveMonitoring && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <InputGroup label="Year" sub="Target year">
+                        <select
+                          value={selectedYear}
+                          onChange={(e) => setSelectedYear(Number(e.target.value))}
+                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
+                        >
+                          {[2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
+                        </select>
+                      </InputGroup>
+                      <InputGroup label="Month" sub="Target month">
+                        <select
+                          value={selectedMonth}
+                          onChange={(e) => setSelectedMonth(Number(e.target.value))}
+                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
+                        >
+                          {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].map((m, i) => (
+                            <option key={m} value={i}>{m}</option>
+                          ))}
+                        </select>
+                      </InputGroup>
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-2 gap-4">
                     <InputGroup label="Interval" sub="Candle timeframe">
@@ -417,69 +430,10 @@ export default function App() {
                     </InputGroup>
                   </div>
 
-                  {/* Strategy Specific Fields */}
+                  {/* Strategy Specific Fields (Minimalist) */}
                   <div className="h-px w-full bg-white/5 my-2" />
 
-                  {selectedStrategyId === 'opening-breakout' && (
-                    <motion.div
-                      key="opening-breakout"
-                      initial={{ opacity: 0, x: 20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      className="space-y-6"
-                    >
-                      <InputGroup label="Range Start Time" sub="Set the definition hour for daily range">
-                        <input
-                          type="time"
-                          value={rangeTime}
-                          onChange={(e) => setRangeTime(e.target.value)}
-                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold focus:border-blue-500/50 outline-none transition-all"
-                        />
-                      </InputGroup>
-
-                      <InputGroup label="Cutoff Time" sub="Daily trade closure forced at this hour">
-                        <input
-                          type="time"
-                          value={cutoffTime}
-                          onChange={(e) => setCutoffTime(e.target.value)}
-                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold focus:border-blue-500/50 outline-none transition-all"
-                        />
-                      </InputGroup>
-
-                      <div className="grid grid-cols-2 gap-4">
-                        <InputGroup label="Buffer ($)" sub="Breakout threshold">
-                          <input
-                            type="number"
-                            value={buffer}
-                            onChange={(e) => setBuffer(Number(e.target.value))}
-                            className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
-                          />
-                        </InputGroup>
-                        <InputGroup label="Risk Reward" sub="Target multiplier">
-                          <input
-                            type="number"
-                            step="0.1"
-                            value={riskReward}
-                            onChange={(e) => setRiskReward(Number(e.target.value))}
-                            className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
-                          />
-                        </InputGroup>
-                      </div>
-
-                      <div className="flex items-center gap-3 px-2 py-2">
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={useTrailingSL}
-                            onChange={(e) => setUseTrailingSL(e.target.checked)}
-                            className="sr-only peer"
-                          />
-                          <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                          <span className="ml-3 text-sm font-bold text-slate-300">Enable Trailing SL</span>
-                        </label>
-                      </div>
-                    </motion.div>
-                  )}
-
+                  {/* MA Crossover Specific Fields */}
                   {selectedStrategyId === 'ma-crossover' && (
                     <motion.div
                       key="ma-crossover"
@@ -510,14 +464,17 @@ export default function App() {
                   <button
                     onClick={runBacktest}
                     disabled={isBacktesting}
-                    className="w-full py-5 bg-blue-600 hover:bg-blue-500 text-white rounded-[2rem] font-black text-sm uppercase tracking-widest shadow-2xl shadow-blue-600/20 transition-all flex items-center justify-center gap-3 active:scale-[0.98] disabled:bg-slate-800"
+                    className={cn(
+                      "w-full py-5 rounded-[2rem] font-black text-sm uppercase tracking-widest shadow-2xl transition-all flex items-center justify-center gap-3 active:scale-[0.98] disabled:bg-slate-800",
+                      isLiveMonitoring ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/20" : "bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20"
+                    )}
                   >
                     {isBacktesting ? (
                       <RefreshCw className="w-5 h-5 animate-spin" />
                     ) : (
                       <Play className="w-5 h-5 fill-current" />
                     )}
-                    {isBacktesting ? 'Computing Data...' : 'Run Simulation'}
+                    {isBacktesting ? 'Computing Live Data...' : (isLiveMonitoring ? 'Start Live Monitoring' : 'Run Simulation')}
                   </button>
                 </div>
               </div>
@@ -570,60 +527,102 @@ export default function App() {
                             <th className="px-8 py-5">Time/Type</th>
                             <th className="px-5 py-5">Entry Price</th>
                             <th className="px-5 py-5">Exit Price</th>
-                            <th className="px-8 py-5 text-right">Net Profit</th>
+                            <th className="px-5 py-5 text-right">Net Profit</th>
+                            <th className="px-10 py-5 text-center">Action</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-white/5">
-                          {backtestResult.trades.map((trade, i) => (
-                            <tr key={i} className="hover:bg-white/[0.02] transition-colors">
-                              <td className="px-8 py-6">
-                                <div className="flex items-center gap-4">
-                                  <div className={cn(
-                                    "w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border",
-                                    trade.direction === 'buy' ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-rose-500/10 border-rose-500/20 text-rose-400"
-                                  )}>
-                                    {trade.direction === 'buy' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
-                                  </div>
-                                  <div>
-                                    <div className="text-sm font-bold text-white capitalize">{trade.direction} Position</div>
-                                    <div className="flex flex-col gap-1 mt-1">
-                                      <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-tighter">
-                                        <span className="text-slate-600 w-12 text-right">Breakout:</span>
-                                        <span className="text-amber-500/80">{dayjs(trade.breakoutTime).format('MMM DD HH:mm')}</span>
+                          {Object.entries(tradesByDay).sort((a, b) => b[0].localeCompare(a[0])).map(([day, data]) => (
+                            <React.Fragment key={day}>
+                              {/* Daily Summary Header */}
+                              <tr className="bg-slate-900/60 border-y border-white/5 group">
+                                <td colSpan={2} className="px-8 py-5">
+                                  <div className="flex items-center gap-4">
+                                    <div className="w-10 h-10 rounded-xl bg-blue-600/10 flex items-center justify-center text-blue-400 group-hover:scale-110 transition-transform">
+                                      <Clock className="w-5 h-5" />
+                                    </div>
+                                    <div>
+                                      <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-0.5 leading-none">Execution Date</div>
+                                      <div className="text-sm font-bold text-slate-100">{dayjs(day).format('MMM D, YYYY')}</div>
+                                    </div>
+                                    <div className="h-8 w-px bg-white/5 ml-4" />
+                                    <div className="flex items-center gap-6 ml-4">
+                                      <div className="flex items-center gap-2">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                        <span className="text-[9px] font-black uppercase text-slate-500">{data.success} <span className="opacity-60">Wins</span></span>
                                       </div>
-                                      <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-tighter">
-                                        <span className="text-slate-600 w-12 text-right">Entry:</span>
-                                        <span className="text-blue-400">{dayjs(trade.entryTime).format('MMM DD HH:mm')}</span>
+                                      <div className="flex items-center gap-2">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                                        <span className="text-[9px] font-black uppercase text-slate-500">{data.failure} <span className="opacity-60">Losses</span></span>
                                       </div>
-                                      <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-tighter">
-                                        <span className="text-slate-600 w-12 text-right">Exit:</span>
-                                        <span className="text-rose-400">{trade.exitTime ? dayjs(trade.exitTime).format('MMM DD HH:mm') : '---'}</span>
-                                      </div>
-                                      {trade.exitReason && (
-                                        <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-tighter">
-                                          <span className="text-slate-600 w-12 text-right">Reason:</span>
-                                          <span className={cn(
-                                            trade.exitReason === 'TP' ? "text-emerald-400" :
-                                              trade.exitReason === 'SL' ? "text-rose-400" :
-                                                "text-slate-400"
-                                          )}>
-                                            {trade.exitReason}
-                                          </span>
-                                        </div>
-                                      )}
                                     </div>
                                   </div>
-                                </div>
-                              </td>
-                              <td className="px-5 py-6 font-mono text-xs text-slate-400">${trade.entryPrice.toLocaleString()}</td>
-                              <td className="px-5 py-6 font-mono text-xs text-slate-400">${trade.exitPrice?.toLocaleString() || '---'}</td>
-                              <td className={cn(
-                                "px-8 py-6 text-right font-black text-sm",
-                                trade.profit > 0 ? "text-emerald-400" : "text-rose-400"
-                              )}>
-                                {trade.profit > 0 ? '+' : ''}{trade.profit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              </td>
-                            </tr>
+                                </td>
+                                <td colSpan={2} className="px-8 py-5 text-right">
+                                  <div className="inline-flex flex-col items-end">
+                                    <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-0.5 leading-none">Daily Performance</div>
+                                    <div className={cn(
+                                      "text-lg font-black tracking-tight",
+                                      data.profit >= 0 ? "text-emerald-400" : "text-rose-400"
+                                    )}>
+                                      {data.profit >= 0 ? '+' : ''}{data.profit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </div>
+                                  </div>
+                                </td>
+                                <td></td>
+                              </tr>
+
+                              {/* Daily Trades */}
+                              {data.trades.sort((a, b) => dayjs(b.entryTime).valueOf() - dayjs(a.entryTime).valueOf()).map((trade, idx) => (
+                                <tr key={`${day}-${idx}`} className="group hover:bg-white/[0.02] transition-colors border-b border-white/5 last:border-0">
+                                  <td className="px-8 py-6">
+                                    <div className="flex items-center gap-4">
+                                      <div className={cn(
+                                        "w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border transition-all",
+                                        trade.direction === 'buy' ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-rose-500/10 border-rose-500/20 text-rose-400"
+                                      )}>
+                                        {trade.direction === 'buy' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
+                                      </div>
+                                      <div>
+                                        <div className="text-sm font-bold text-white capitalize">{trade.direction} Position</div>
+                                        <div className="flex items-center gap-2 mt-1 text-[9px] font-black uppercase tracking-tighter">
+                                          <span className="text-blue-400">{dayjs(trade.entryTime).format('HH:mm:ss')}</span>
+                                          <span className="text-slate-700">•</span>
+                                          <span className="text-slate-500">{trade.units?.toFixed(4)} UNITS</span>
+                                          {trade.exitReason && (
+                                            <>
+                                              <span className="text-slate-700">•</span>
+                                              <span className={cn(
+                                                "font-black",
+                                                trade.exitReason === 'TP' ? "text-emerald-500" :
+                                                  trade.exitReason === 'SL' ? "text-rose-500" : "text-slate-500"
+                                              )}>{trade.exitReason}</span>
+                                            </>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td className="px-5 py-6 font-mono text-xs text-slate-400">${trade.entryPrice.toLocaleString()}</td>
+                                  <td className="px-5 py-6 font-mono text-xs text-slate-400">${trade.exitPrice?.toLocaleString() || '---'}</td>
+                                  <td className={cn(
+                                    "px-5 py-6 text-right font-black text-sm",
+                                    trade.profit > 0 ? "text-emerald-400" : "text-rose-400"
+                                  )}>
+                                    {trade.profit > 0 ? '+' : ''}{trade.profit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                  </td>
+                                  <td className="px-10 py-6 text-center">
+                                    <button
+                                      onClick={() => setSelectedTradeForView(trade)}
+                                      className="p-3 rounded-xl bg-slate-800 hover:bg-blue-600/20 text-slate-400 hover:text-blue-400 border border-white/5 transition-all shadow-lg active:scale-95"
+                                      title="View on Chart"
+                                    >
+                                      <Eye className="w-5 h-5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </React.Fragment>
                           ))}
                         </tbody>
                       </table>
@@ -652,6 +651,225 @@ export default function App() {
     </div>
   )
 }
+
+function TradeViewModal({ trade, pair, resolution, isLiveMonitoring, onClose }: { trade: Trade, pair: string, resolution: string, isLiveMonitoring: boolean, onClose: () => void }) {
+  const chartContainerRef = useRef<HTMLDivElement>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let isMounted = true;
+    let chart: any;
+
+    const fetchTradeData = async () => {
+      try {
+        setLoading(true)
+        const resInMin = resolution === 'D' ? 1440 : parseInt(resolution)
+        const paddingBefore = 40 * resInMin * 60
+        const paddingAfter = 20 * resInMin * 60
+
+        // Use breakoutTime if available, else entryTime. Ensure we don't have NaN.
+        const refTimeStr = trade.breakoutTime || trade.entryTime
+        const refTimeUnix = dayjs(refTimeStr).isValid() ? Math.floor(dayjs(refTimeStr).valueOf() / 1000) : Math.floor(Date.now() / 1000)
+
+        const startUnix = refTimeUnix - paddingBefore
+        const endUnix = (trade.exitTime && dayjs(trade.exitTime).isValid())
+          ? Math.floor(dayjs(trade.exitTime).valueOf() / 1000) + paddingAfter
+          : Math.floor(Date.now() / 1000)
+
+        const response = await axios.get<ApiResponse>(`${API_BASE_URL}/market-data`, {
+          params: { pair, resolution, from: startUnix, to: endUnix, isTest: isLiveMonitoring }
+        })
+        console.log(`[Modal] Received ${response.data.data?.length || 0} candles`);
+
+        if (!isMounted || !chartContainerRef.current) return
+
+        // Clean up any lingering charts to prevent duplicates
+        chartContainerRef.current.innerHTML = '';
+
+        chart = createChart(chartContainerRef.current, {
+          layout: {
+            background: { type: ColorType.Solid, color: 'transparent' },
+            textColor: '#94a3b8',
+          },
+          grid: {
+            vertLines: { color: 'rgba(255, 255, 255, 0.03)' },
+            horzLines: { color: 'rgba(255, 255, 255, 0.03)' },
+          },
+          width: chartContainerRef.current.clientWidth || 900,
+          height: 450,
+          timeScale: {
+            borderColor: 'rgba(255, 255, 255, 0.1)',
+            timeVisible: true,
+          }
+        })
+
+        const candleSeries = chart.addSeries(CandlestickSeries, {
+          upColor: '#10b981',
+          downColor: '#ef4444',
+          borderVisible: false,
+          wickUpColor: '#10b981',
+          wickDownColor: '#ef4444',
+        })
+
+        const entryT = dayjs(trade.entryTime).valueOf();
+        const exitT = trade.exitTime ? dayjs(trade.exitTime).valueOf() : null;
+        const istOffset = 5.5 * 60 * 60; // 5 hours 30 mins in seconds
+
+        const sortedData = [...response.data.data].sort((a, b) => a.time - b.time).map(c => {
+          const isEntry = Math.abs(c.time - entryT) < 1000;
+          const isExit = exitT && Math.abs(c.time - exitT) < 1000;
+
+          return {
+            time: (Math.floor(c.time / 1000) + istOffset) as any,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            color: isEntry ? '#a78bfa' : (isExit ? '#f472b6' : undefined),
+            wickColor: isEntry ? '#a78bfa' : (isExit ? '#f472b6' : undefined),
+          }
+        })
+
+        candleSeries.setData(sortedData)
+
+        // Add Horizontal Lines for Range, Entry, and Exit
+        if (trade.rangeHigh) {
+          candleSeries.createPriceLine({
+            price: trade.rangeHigh,
+            color: '#f59e0b',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'Range High',
+          })
+        }
+        if (trade.rangeLow) {
+          candleSeries.createPriceLine({
+            price: trade.rangeLow,
+            color: '#f59e0b',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'Range Low',
+          })
+        }
+
+        candleSeries.createPriceLine({
+          price: trade.entryPrice,
+          color: trade.direction === 'buy' ? '#10b981' : '#ef4444',
+          lineWidth: 2,
+          lineStyle: LineStyle.Solid,
+          axisLabelVisible: true,
+          title: 'Entry',
+        })
+
+        if (trade.exitPrice) {
+          candleSeries.createPriceLine({
+            price: trade.exitPrice,
+            color: '#94a3b8',
+            lineWidth: 2,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'Exit',
+          })
+        }
+
+        const markers: any[] = []
+        markers.push({
+          time: Math.floor(dayjs(trade.entryTime).valueOf() / 1000) + istOffset,
+          position: trade.direction === 'buy' ? 'belowBar' : 'aboveBar',
+          color: '#a78bfa',
+          shape: trade.direction === 'buy' ? 'arrowUp' : 'arrowDown',
+          text: `ENTER`
+        })
+
+        if (trade.exitTime) {
+          markers.push({
+            time: Math.floor(dayjs(trade.exitTime).valueOf() / 1000) + istOffset,
+            position: trade.direction === 'buy' ? 'aboveBar' : 'belowBar',
+            color: '#f472b6',
+            shape: trade.direction === 'buy' ? 'arrowDown' : 'arrowUp',
+            text: `EXIT`
+          })
+        }
+
+        candleSeries.setMarkers(markers)
+        chart.timeScale().fitContent()
+        setLoading(false)
+      } catch (err) {
+        console.error(err)
+        setLoading(false)
+      }
+    }
+
+    fetchTradeData()
+    return () => {
+      isMounted = false;
+      if (chart) chart.remove();
+    }
+  }, [trade, pair, resolution, isLiveMonitoring])
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-8 bg-slate-950/90 backdrop-blur-xl"
+    >
+      <motion.div
+        initial={{ scale: 0.95, y: 30 }}
+        animate={{ scale: 1, y: 0 }}
+        exit={{ scale: 0.95, y: 30 }}
+        className="w-full max-w-6xl bg-slate-900 border border-white/10 rounded-[3rem] shadow-2xl overflow-hidden relative"
+      >
+        <div className="px-10 py-8 border-b border-white/5 flex items-center justify-between bg-slate-900/50">
+          <div className="flex items-center gap-6">
+            <div className={cn(
+              "w-14 h-14 rounded-2xl flex items-center justify-center border shadow-2xl",
+              trade.direction === 'buy' ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-rose-500/10 border-rose-500/20 text-rose-400"
+            )}>
+              {trade.direction === 'buy' ? <TrendingUp className="w-8 h-8" /> : <TrendingDown className="w-8 h-8" />}
+            </div>
+            <div>
+              <h3 className="font-black text-2xl tracking-tighter uppercase">{trade.direction === 'buy' ? 'Long' : 'Short'} Execution Analysis</h3>
+              <p className="text-xs font-black text-slate-500 uppercase tracking-[0.2em] mt-1">{pair} • {resolution}M Resolution</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-4 rounded-2xl bg-white/5 hover:bg-white/10 text-slate-400 transition-all active:scale-95"><X className="w-6 h-6" /></button>
+        </div>
+
+        <div className="p-10">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
+            <ModalStat label="Entry" value={`$${trade.entryPrice.toLocaleString()}`} />
+            <ModalStat label="Exit" value={trade.exitPrice ? `$${trade.exitPrice.toLocaleString()}` : '---'} />
+            <ModalStat label="Net Profit" value={`$${trade.profit.toLocaleString(undefined, { minimumFractionDigits: 2 })}`} color={trade.profit > 0 ? "text-emerald-400" : "text-rose-400"} />
+            <ModalStat label="Timeline" value={`${dayjs(trade.entryTime).format('MMM D, HH:mm')} — ${trade.exitTime ? dayjs(trade.exitTime).format('HH:mm') : 'Active'}`} />
+          </div>
+
+          <div className="relative bg-slate-950/50 rounded-[2.5rem] border border-white/5 overflow-hidden min-h-[450px]">
+            {loading && (
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-950/40 backdrop-blur-md">
+                <RefreshCw className="w-10 h-10 text-blue-500 animate-spin mb-4" />
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Rendering Simulation...</span>
+              </div>
+            )}
+            <div ref={chartContainerRef} className="w-full" />
+          </div>
+        </div>
+      </motion.div>
+    </motion.div>
+  )
+}
+
+function ModalStat({ label, value, color = "text-white" }: { label: string, value: string, color?: string }) {
+  return (
+    <div className="p-6 bg-slate-950/40 border border-white/5 rounded-3xl group hover:border-white/10 transition-colors">
+      <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">{label}</p>
+      <p className={cn("text-xl font-black tracking-tight", color)}>{value}</p>
+    </div>
+  )
+}
+
 
 function CandleRow({ candle, index }: { candle: Candle, index: number }) {
   const isGreen = candle.close >= candle.open
