@@ -5,6 +5,7 @@ import axios from 'axios';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
+import crypto from 'crypto';
 
 import dummyData from './data/dummy_15m.json' with { type: 'json' };
 
@@ -18,12 +19,136 @@ const PORT = process.env.PORT || 5001;
 
 app.use(cors());
 app.use(express.json());
-
 // CoinDCX API Details
 const COINDCX_URL = "https://public.coindcx.com/market_data/candlesticks";
 
+// --- CoinDCX API Auth ---
+function createSignature(payload: any, secret: string) {
+    const signature = crypto
+        .createHmac('sha256', secret)
+        .update(JSON.stringify(payload))
+        .digest('hex');
+    return signature;
+}
+
+app.post('/api/trade/execute', async (req: Request, res: Response) => {
+    try {
+        console.log('hitting----')
+        const apiKey = process.env.COINDCX_API_KEY;
+        const apiSecret = process.env.COINDCX_API_SECRET;
+        const { side, pair, price, capital = 100, orderType = "limit_order" } = req.body;
+
+        if (!apiKey || !apiSecret) {
+            return res.status(400).json({ error: 'Backend API Key and Secret are not configured' });
+        }
+
+        // Dynamic precision based on pair
+        let precision = 6;
+        if (pair.includes('DOGE')) precision = 0; // DOGE requires integer quantity
+        if (pair.includes('ETH')) precision = 5;
+
+        // Lot sizing: Use slightly less than 100 to account for fees
+        const tradeAmountINR = 180;
+        const quantity = parseFloat((tradeAmountINR / price).toFixed(precision));
+        console.log(quantity, 'quantity------')
+        const timeStamp = Date.now();
+        const body = {
+            side,
+            order_type: orderType,
+            market: pair,
+            price_per_unit: price,
+            total_quantity: quantity,
+            timestamp: timeStamp,
+            client_order_id: `T-${timeStamp}`
+        };
+
+        const bodyString = JSON.stringify(body);
+        const signature = crypto
+            .createHmac('sha256', apiSecret)
+            .update(bodyString)
+            .digest('hex');
+
+        console.log('--- EXECUTING LIVE TRADE ---');
+        console.log('Market:', pair);
+        console.log('orderType:', orderType);
+        console.log('Side:', side);
+        console.log('Price:', price);
+        console.log('Capital Used:', capital);
+        console.log('Quantity:', quantity);
+        console.log('Precision Used:', precision);
+        console.log('Body String:', bodyString);
+        console.log('---------------------------');
+
+        const response = await axios.post('https://api.coindcx.com/exchange/v1/orders/create', bodyString, {
+            headers: {
+                'X-AUTH-APIKEY': apiKey,
+                'X-AUTH-SIGNATURE': signature,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        res.json(response.data);
+    } catch (error: any) {
+        if (error.response) {
+            console.error('CoinDCX API Error Response:', JSON.stringify(error.response.data, null, 2));
+            return res.status(error.response.status).json(error.response.data);
+        }
+        console.error('Execution Error:', error.message);
+        res.status(500).json({ error: 'Trade execution failed: ' + error.message });
+    }
+});
+
 app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    res.json({
+        status: 'ok', timestamp: new Date().toISOString()
+
+    });
+});
+
+app.post('/api/user/balances', async (req: Request, res: Response) => {
+    try {
+        const apiKey = process.env.COINDCX_API_KEY;
+        const apiSecret = process.env.COINDCX_API_SECRET;
+
+        if (!apiKey || !apiSecret) {
+            return res.status(400).json({ error: 'Backend API Key and Secret are not configured' });
+        }
+
+        const timeStamp = Date.now();
+        const body = {
+            timestamp: timeStamp
+        };
+
+        const bodyString = JSON.stringify(body);
+        const signature = crypto
+            .createHmac('sha256', apiSecret)
+            .update(bodyString)
+            .digest('hex');
+
+        const response = await axios.post('https://api.coindcx.com/exchange/v1/users/balances', bodyString, {
+            headers: {
+                'X-AUTH-APIKEY': apiKey,
+                'X-AUTH-SIGNATURE': signature,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        res.json(response.data);
+    } catch (error: any) {
+        if (error.response) {
+            console.error('CoinDCX API Error Response:', JSON.stringify(error.response.data, null, 2));
+            return res.status(error.response.status).json(error.response.data);
+        }
+        res.status(500).json({ error: 'Failed to fetch balances: ' + error.message });
+    }
+});
+
+app.get('/api/strategies', (_req: Request, res: Response) => {
+    const strategies = [
+        { id: 'opening-breakout', name: 'Opening Breakout' },
+        { id: 'ma-crossover', name: 'MA Crossover' }
+    ];
+    res.json(strategies);
 });
 
 app.get('/api/market-data', async (req: Request, res: Response) => {
@@ -47,9 +172,7 @@ app.get('/api/market-data', async (req: Request, res: Response) => {
             pcode: 'f'
         };
 
-        console.log('Fetching market data with params:', params);
         const response = await axios.get(COINDCX_URL, { params });
-        console.log('Exchange returned candles:', response.data.data?.length || 0);
         res.json(response.data);
     } catch (error: any) {
         if (error.response) {
@@ -58,6 +181,22 @@ app.get('/api/market-data', async (req: Request, res: Response) => {
             console.error('Error fetching market data:', error.message);
         }
         res.status(500).json({ error: 'Failed to fetch market data from exchange' });
+    }
+});
+
+app.get('/api/ticker', async (req: Request, res: Response) => {
+    try {
+        const { pair = "BTCUSDT" } = req.query;
+        // CoinDCX ticker returns an array of all pairs
+        const response = await axios.get('https://api.coindcx.com/exchange/ticker');
+        const ticker = response.data.find((t: any) => t.market === pair);
+        if (ticker) {
+            res.json({ last_price: ticker.last_price });
+        } else {
+            res.status(404).json({ error: 'Pair not found' });
+        }
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch ticker' });
     }
 });
 
@@ -102,18 +241,21 @@ function calculateEMA(data: number[], period: number, index: number): number {
     return ema;
 }
 
-// --- AVG VOLUME ---
+
 function avgVolume(candles: Candle[], i: number, period = 20): number {
     let sum = 0;
-    const start = Math.max(0, i - period);
-    const count = i - start;
-    for (let j = start; j < i; j++) {
+    let count = 0;
+
+    for (let j = Math.max(0, i - period); j < i; j++) {
         const c = candles[j];
-        if (c) sum += c.volume;
+        if (c) {
+            sum += c.volume;
+            count++;
+        }
     }
+
     return count > 0 ? sum / count : 0;
 }
-
 // --- ATR Calculation ---
 function calculateATR(candles: Candle[], period = 14, index: number): number {
     let trs: number[] = [];
@@ -139,6 +281,10 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
             to,
             month,
             year,
+            startYear,
+            startMonth,
+            endYear,
+            endMonth,
             pair = "B-BTC_USDT",
             capitalPerTrade = 1,
             resolution = "5",
@@ -146,190 +292,421 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
             feeRate = 0.0002
         } = req.body;
 
-        let simulationStartUnix: number; // The target period start (usually 12:00 AM)
-        let dataFetchStartUnix: number; // The buffer start (usually 24h before)
-        let endUnix: number;
+        let allTrades: Trade[] = [];
+        let periods: { year: number, month: number }[] = [];
 
         if (isLive) {
-            // Live monitoring: Always start the strategy FROM 12:00 AM today
             const todayStart = dayjs().tz('Asia/Kolkata').startOf('day');
-            simulationStartUnix = Math.floor(todayStart.valueOf() / 1000);
-            dataFetchStartUnix = simulationStartUnix - (24 * 60 * 60); // 24-hour buffer for EMAs
-            endUnix = Math.floor(Date.now() / 1000);
+            periods.push({ year: todayStart.year(), month: todayStart.month() });
+        } else if (startYear !== undefined && startMonth !== undefined && endYear !== undefined && endMonth !== undefined) {
+            let current = dayjs().year(startYear).month(startMonth).startOf('month');
+            const end = dayjs().year(endYear).month(endMonth).endOf('month');
+            while (current.isBefore(end)) {
+                periods.push({ year: current.year(), month: current.month() });
+                current = current.add(1, 'month');
+            }
         } else if (year !== undefined && month !== undefined) {
-            // Historical: Start searching from 12:00 AM on the first of the month
-            const monthStart = dayjs().year(year).month(month).startOf('month');
-            const monthEnd = dayjs().year(year).month(month).endOf('month');
-            simulationStartUnix = Math.floor(monthStart.valueOf() / 1000);
-            dataFetchStartUnix = simulationStartUnix - (24 * 60 * 60); // 24-hour buffer for EMAs
-            endUnix = Math.floor(monthEnd.valueOf() / 1000);
+            periods.push({ year, month });
         } else {
-            simulationStartUnix = from || Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
-            dataFetchStartUnix = simulationStartUnix;
-            endUnix = to || Math.floor(Date.now() / 1000);
+            // Fallback to 'from' and 'to' or last 30 days
+            const s = from ? dayjs.unix(from) : dayjs().subtract(30, 'days');
+            const e = to ? dayjs.unix(to) : dayjs();
+            let current = s.startOf('month');
+            while (current.isBefore(e)) {
+                periods.push({ year: current.year(), month: current.month() });
+                current = current.add(1, 'month');
+            }
         }
 
-        const response = await axios.get(COINDCX_URL, {
-            params: { pair, from: dataFetchStartUnix, to: endUnix, resolution, pcode: 'f' }
-        });
+        for (const period of periods) {
+            const monthStart = dayjs().year(period.year).month(period.month).startOf('month');
+            const monthEnd = dayjs().year(period.year).month(period.month).endOf('month');
 
-        if (response.data.s !== 'ok' || !Array.isArray(response.data.data)) {
-            return res.status(400).json({ error: 'Invalid market data' });
-        }
+            let simulationStartUnix = Math.floor(monthStart.valueOf() / 1000);
+            let dataFetchStartUnix = simulationStartUnix - (24 * 60 * 60);
+            let endUnix = Math.floor(monthEnd.valueOf() / 1000);
 
-        const candles: Candle[] = response.data.data.sort((a: Candle, b: Candle) => a.time - b.time);
-        const closes = candles.map(c => c.close);
-
-        let trades: Trade[] = [];
-        let currentTrade: Trade | null = null;
-
-        let rangeHigh: number | null = null;
-        let rangeLow: number | null = null;
-
-        let waiting = false;
-        let direction: 'buy' | 'sell' | null = null;
-        let lastBreakoutTime: string | null = null;
-
-        for (let i = 50; i < candles.length; i++) {
-            const c = candles[i];
-            if (!c) continue;
-            const time = dayjs(c.time).tz('Asia/Kolkata');
-
-            // Synchronize with 12:00 AM: Only start searching for trades after the buffer period
-            if (c.time < simulationStartUnix * 1000) {
-                continue;
+            if (isLive) {
+                const todayStart = dayjs().tz('Asia/Kolkata').startOf('day');
+                simulationStartUnix = Math.floor(todayStart.valueOf() / 1000);
+                dataFetchStartUnix = simulationStartUnix - (24 * 60 * 60);
+                endUnix = Math.floor(Date.now() / 1000);
             }
 
-            if (!rangeHigh && !rangeLow) {
-                const prev1 = candles[i - 1];
-                const prev2 = candles[i - 2];
-                if (prev1 && prev2) {
-                    rangeHigh = Math.max(prev1.high, prev2.high);
-                    rangeLow = Math.min(prev1.low, prev2.low);
-                }
-            }
-            if (rangeHigh === null || rangeLow === null) continue;
+            try {
+                const response = await axios.get(COINDCX_URL, {
+                    params: { pair, from: dataFetchStartUnix, to: endUnix, resolution, pcode: 'f' }
+                });
 
-            const ema20 = calculateEMA(closes, 20, i);
-            const ema50 = calculateEMA(closes, 50, i);
-            if (Math.abs(ema20 - ema50) < 15) continue;
+                if (response.data.s === 'ok' && Array.isArray(response.data.data)) {
+                    const candles: Candle[] = response.data.data.sort((a: Candle, b: Candle) => a.time - b.time);
+                    const closes = candles.map(c => c.close);
 
-            const body = Math.abs(c.close - c.open);
-            const range = c.high - c.low;
-            if (range <= 0 || body / range <= 0.6) continue;
-            if (c.volume <= avgVolume(candles, i) * 1.3) continental: continue;
-            if (Math.abs(c.close - ema20) < 10) continue;
+                    let currentTrade: Trade | null = null;
+                    let rangeHigh: number | null = null;
+                    let rangeLow: number | null = null;
+                    let waiting = false;
+                    let direction: 'buy' | 'sell' | null = null;
+                    let lastBreakoutTime: string | null = null;
 
-            // --- TRADE MANAGEMENT ---
-            if (currentTrade) {
-                if (currentTrade.direction === 'buy') {
-                    if (c.high > (currentTrade.lastHigh || currentTrade.entryPrice)) {
-                        const move = c.high - (currentTrade.lastHigh || currentTrade.entryPrice);
-                        currentTrade.sl += move;
-                        currentTrade.lastHigh = c.high;
+                    for (let i = 50; i < candles.length; i++) {
+                        const c = candles[i];
+                        if (!c || c.time < simulationStartUnix * 1000) continue;
+                        const time = dayjs(c.time).tz('Asia/Kolkata');
+
+                        if (!rangeHigh && !rangeLow) {
+                            const prev1 = candles[i - 1];
+                            const prev2 = candles[i - 2];
+                            if (prev1 && prev2) {
+                                rangeHigh = Math.max(prev1.high, prev2.high);
+                                rangeLow = Math.min(prev1.low, prev2.low);
+                            }
+                        }
+                        if (rangeHigh === null || rangeLow === null) continue;
+
+                        const ema20 = calculateEMA(closes, 20, i);
+                        const ema50 = calculateEMA(closes, 50, i);
+                        if (Math.abs(ema20 - ema50) < 15) continue;
+
+                        const body = Math.abs(c.close - c.open);
+                        const range = c.high - c.low;
+                        if (range <= 0 || body / range <= 0.6) continue;
+                        if (c.volume <= avgVolume(candles, i) * 1.3) continue;
+                        if (Math.abs(c.close - ema20) < 10) continue;
+
+                        if (currentTrade) {
+                            if (currentTrade.direction === 'buy') {
+                                const lastHigh = currentTrade.lastHigh ?? currentTrade.entryPrice;
+                                if (c.high > lastHigh) {
+                                    const move = c.high - lastHigh;
+                                    currentTrade.sl += move;
+                                    currentTrade.lastHigh = c.high;
+                                }
+                                if (c.close <= currentTrade.sl) {
+                                    currentTrade.exitPrice = currentTrade.sl;
+                                    currentTrade.exitReason = 'SL';
+                                    currentTrade.status = 'closed';
+                                }
+                            } else {
+                                const lastLow = currentTrade.lastLow ?? currentTrade.entryPrice;
+                                if (c.low < lastLow) {
+                                    const move = lastLow - c.low;
+                                    currentTrade.sl -= move;
+                                    currentTrade.lastLow = c.low;
+                                }
+                                if (c.close >= currentTrade.sl) {
+                                    currentTrade.exitPrice = currentTrade.sl;
+                                    currentTrade.exitReason = 'SL';
+                                    currentTrade.status = 'closed';
+                                }
+                            }
+
+                            if (currentTrade.status === 'closed') {
+                                currentTrade.exitTime = time.toISOString();
+                                const units = currentTrade.units || 0;
+                                const grossProfit = currentTrade.direction === 'buy'
+                                    ? (currentTrade.exitPrice! - currentTrade.entryPrice) * units
+                                    : (currentTrade.entryPrice - currentTrade.exitPrice!) * units;
+
+                                const entryVal = currentTrade.entryPrice * units;
+                                const exitVal = (currentTrade.exitPrice || 0) * units;
+                                const fee = (entryVal + exitVal) * feeRate;
+
+                                currentTrade.fee = fee;
+                                currentTrade.profit = grossProfit - fee;
+                                allTrades.push(currentTrade);
+                                currentTrade = null;
+                            }
+                            continue;
+                        }
+
+                        if (!waiting) {
+                            if (c.high > rangeHigh && ema20 > ema50) {
+                                direction = 'buy';
+                                waiting = true;
+                                lastBreakoutTime = time.toISOString();
+                            } else if (c.low < rangeLow && ema20 < ema50) {
+                                direction = 'sell';
+                                waiting = true;
+                                lastBreakoutTime = time.toISOString();
+                            }
+                        } else {
+                            const entry = c.close;
+                            const atr = calculateATR(candles, 14, i);
+                            const sl = direction === 'buy' ? entry - atr * atrMultiplierSL : entry + atr * atrMultiplierSL;
+                            const riskPerUnit = Math.abs(entry - sl);
+                            const units = riskPerUnit > 0 ? capitalPerTrade / riskPerUnit : 0;
+
+                            currentTrade = {
+                                rangeHigh,
+                                rangeLow,
+                                breakoutTime: lastBreakoutTime || time.toISOString(),
+                                entryTime: time.toISOString(),
+                                direction: direction!,
+                                entryPrice: entry,
+                                sl,
+                                status: 'open',
+                                profit: 0,
+                                lastHigh: entry,
+                                lastLow: entry,
+                                units
+                            };
+                            waiting = false;
+                            rangeHigh = null;
+                            rangeLow = null;
+                        }
                     }
-                    if (c.close <= currentTrade.sl) {
-                        currentTrade.exitPrice = currentTrade.sl;
-                        currentTrade.exitReason = 'SL';
-                        currentTrade.status = 'closed';
-                    }
-                } else {
-                    if (c.low < (currentTrade.lastLow || currentTrade.entryPrice)) {
-                        const move = (currentTrade.lastLow || currentTrade.entryPrice) - c.low;
-                        currentTrade.sl -= move;
-                        currentTrade.lastLow = c.low;
-                    }
-                    if (c.close >= currentTrade.sl) {
-                        currentTrade.exitPrice = currentTrade.sl;
-                        currentTrade.exitReason = 'SL';
-                        currentTrade.status = 'closed';
-                    }
                 }
-
-                if (currentTrade.status === 'closed') {
-                    currentTrade.exitTime = time.toISOString();
-                    const grossProfit =
-                        currentTrade.direction === 'buy'
-                            ? (currentTrade.exitPrice! - currentTrade.entryPrice) * (currentTrade.units || 0)
-                            : (currentTrade.entryPrice - currentTrade.exitPrice!) * (currentTrade.units || 0);
-
-                    const entryVal = currentTrade.entryPrice * (currentTrade.units || 0);
-                    const exitVal = (currentTrade.exitPrice || 0) * (currentTrade.units || 0);
-                    const fee = (entryVal + exitVal) * feeRate;
-
-                    currentTrade.fee = fee;
-                    currentTrade.profit = grossProfit - fee;
-                    trades.push(currentTrade);
-                    currentTrade = null;
-                }
-
-                continue;
-            }
-
-            // --- BREAKOUT ---
-            if (!waiting) {
-                if (c.high > rangeHigh && ema20 > ema50) {
-                    direction = 'buy';
-                    waiting = true;
-                    lastBreakoutTime = time.toISOString();
-                } else if (c.low < rangeLow && ema20 < ema50) {
-                    direction = 'sell';
-                    waiting = true;
-                    lastBreakoutTime = time.toISOString();
-                }
-            }
-
-            // --- ENTRY ---
-            else {
-                const entry = c.close;
-                const atr = calculateATR(candles, 14, i);
-                const sl = direction === 'buy'
-                    ? entry - atr * atrMultiplierSL
-                    : entry + atr * atrMultiplierSL;
-
-                const riskPerUnit = Math.abs(entry - sl);
-                const units = riskPerUnit > 0 ? capitalPerTrade / riskPerUnit : 0;
-
-                currentTrade = {
-                    rangeHigh,
-                    rangeLow,
-                    breakoutTime: lastBreakoutTime || time.toISOString(),
-                    entryTime: time.toISOString(),
-                    direction: direction!,
-                    entryPrice: entry,
-                    sl,
-                    status: 'open',
-                    profit: 0,
-                    lastHigh: entry,
-                    lastLow: entry,
-                    units
-                };
-
-                waiting = false;
-                rangeHigh = null;
-                rangeLow = null;
+            } catch (err) {
+                console.error(`Error in period ${period.year}-${period.month}:`, err);
             }
         }
 
         const summary = {
-            totalProfit: trades.reduce((a, t) => a + t.profit, 0),
-            totalFee: trades.reduce((a, t) => a + (t.fee || 0), 0),
-            count: trades.length,
-            successCount: trades.filter(t => t.profit > 0).length,
-            failedCount: trades.filter(t => t.profit <= 0).length,
-            winRate:
-                trades.length > 0
-                    ? (trades.filter(t => t.profit > 0).length / trades.length) * 100
-                    : 0
+            totalProfit: allTrades.reduce((a, t) => a + t.profit, 0),
+            totalFee: allTrades.reduce((a, t) => a + (t.fee || 0), 0),
+            count: allTrades.length,
+            successCount: allTrades.filter(t => t.profit > 0).length,
+            failedCount: allTrades.filter(t => t.profit <= 0).length,
+            winRate: allTrades.length > 0 ? (allTrades.filter(t => t.profit > 0).length / allTrades.length) * 100 : 0
         };
 
-        res.json({ trades, summary });
+        res.json({ trades: allTrades, summary });
 
     } catch (err: any) {
         console.error(err);
         res.status(500).json({ error: 'Backtest failed' });
     }
 });
+//find best combination 
+
+app.post('/api/backtest/optimize', async (req: Request, res: Response) => {
+    try {
+        const {
+            pair = "B-BTC_USDT",
+            startYear = dayjs().year() - 3,
+            resolutions = ["5", "15", "30"],
+            atrMultipliers = [1, 2, 3, 4, 5],
+            feeRate = 0.0002
+        } = req.body;
+
+        const capitalPerTrade = 1;
+        const now = dayjs();
+        const start = dayjs().year(startYear).startOf('year');
+
+        // Generate list of months to check
+        const months: { year: number, month: number }[] = [];
+        let current = start;
+        while (current.isBefore(now)) {
+            months.push({ year: current.year(), month: current.month() });
+            current = current.add(1, 'month');
+        }
+
+        console.log(`Optimizing for ${pair} over ${months.length} months...`);
+
+        // results[res][atr] = { totalProfit, totalTrades, winRate, monthlyProfits: [] }
+        const configResults: Record<string, Record<number, any>> = {};
+
+        for (const resolution of resolutions) {
+            configResults[resolution] = {};
+            for (const atr of atrMultipliers) {
+                configResults[resolution][atr] = {
+                    totalProfit: 0,
+                    totalTrades: 0,
+                    wins: 0,
+                    monthlyProfits: []
+                };
+            }
+        }
+
+        // To avoid redundant API calls, we'll loop months then resolutions
+        for (const m of months) {
+            const monthStart = dayjs().year(m.year).month(m.month).startOf('month');
+            const monthEnd = dayjs().year(m.year).month(m.month).endOf('month');
+            const simulationStartUnix = Math.floor(monthStart.valueOf() / 1000);
+            const dataFetchStartUnix = simulationStartUnix - (24 * 60 * 60);
+            const endUnix = Math.floor(monthEnd.valueOf() / 1000);
+
+            for (const resolution of resolutions) {
+                try {
+                    const response = await axios.get(COINDCX_URL, {
+                        params: { pair, from: dataFetchStartUnix, to: endUnix, resolution, pcode: 'f' }
+                    });
+
+                    if (response.data.s !== 'ok' || !Array.isArray(response.data.data)) {
+                        continue;
+                    }
+
+                    const candles: Candle[] = response.data.data.sort((a: Candle, b: Candle) => a.time - b.time);
+                    const closes = candles.map(c => c.close);
+
+                    for (const atrMultiplierSL of atrMultipliers) {
+                        let trades: Trade[] = [];
+                        let currentTrade: Trade | null = null;
+                        let rangeHigh: number | null = null;
+                        let rangeLow: number | null = null;
+                        let waiting = false;
+                        let direction: 'buy' | 'sell' | null = null;
+
+                        for (let i = 50; i < candles.length; i++) {
+                            const c = candles[i];
+                            if (!c || c.time < simulationStartUnix * 1000) continue;
+
+                            if (!rangeHigh && !rangeLow) {
+                                const p1 = candles[i - 1];
+                                const p2 = candles[i - 2];
+                                if (p1 && p2) {
+                                    rangeHigh = Math.max(p1.high, p2.high);
+                                    rangeLow = Math.min(p1.low, p2.low);
+                                }
+                            }
+                            if (rangeHigh === null || rangeLow === null) continue;
+
+                            const ema20 = calculateEMA(closes, 20, i);
+                            const ema50 = calculateEMA(closes, 50, i);
+                            if (Math.abs(ema20 - ema50) < 15) continue;
+
+                            const body = Math.abs(c.close - c.open);
+                            const range = c.high - c.low;
+                            if (range <= 0 || body / range <= 0.6) continue;
+                            if (c.volume <= avgVolume(candles, i) * 1.3) continue;
+                            if (Math.abs(c.close - ema20) < 10) continue;
+
+                            if (currentTrade) {
+                                if (currentTrade.direction === 'buy') {
+                                    const lastHigh = currentTrade.lastHigh ?? currentTrade.entryPrice;
+                                    if (c.high > lastHigh) {
+                                        const move = c.high - lastHigh;
+                                        currentTrade.sl += move;
+                                        currentTrade.lastHigh = c.high;
+                                    }
+                                    if (c.close <= currentTrade.sl) {
+                                        currentTrade.exitPrice = currentTrade.sl;
+                                        currentTrade.status = 'closed';
+                                    }
+                                } else {
+                                    const lastLow = currentTrade.lastLow ?? currentTrade.entryPrice;
+                                    if (c.low < lastLow) {
+                                        const move = lastLow - c.low;
+                                        currentTrade.sl -= move;
+                                        currentTrade.lastLow = c.low;
+                                    }
+                                    if (c.close >= currentTrade.sl) {
+                                        currentTrade.exitPrice = currentTrade.sl;
+                                        currentTrade.status = 'closed';
+                                    }
+                                }
+
+                                if (currentTrade.status === 'closed') {
+                                    const units = currentTrade.units || 0;
+                                    const gross = currentTrade.direction === 'buy'
+                                        ? (currentTrade.exitPrice! - currentTrade.entryPrice) * units
+                                        : (currentTrade.entryPrice - currentTrade.exitPrice!) * units;
+                                    const entryVal = currentTrade.entryPrice * units;
+                                    const exitVal = (currentTrade.exitPrice || 0) * units;
+                                    const fee = (entryVal + exitVal) * feeRate;
+
+                                    currentTrade.profit = gross - fee;
+                                    trades.push(currentTrade);
+                                    currentTrade = null;
+                                }
+                                continue;
+                            }
+
+                            if (!waiting) {
+                                if (c.high > rangeHigh && ema20 > ema50) {
+                                    direction = 'buy';
+                                    waiting = true;
+                                } else if (c.low < rangeLow && ema20 < ema50) {
+                                    direction = 'sell';
+                                    waiting = true;
+                                }
+                            } else {
+                                const entry = c.close;
+                                const atr = calculateATR(candles, 14, i);
+                                const sl = direction === 'buy' ? entry - atr * atrMultiplierSL : entry + atr * atrMultiplierSL;
+                                const riskPerUnit = Math.abs(entry - sl);
+                                const units = riskPerUnit > 0 ? capitalPerTrade / riskPerUnit : 0;
+
+                                currentTrade = {
+                                    entryTime: dayjs(c.time).toISOString(),
+                                    direction: direction!,
+                                    entryPrice: entry,
+                                    sl,
+                                    status: 'open',
+                                    profit: 0,
+                                    lastHigh: entry,
+                                    lastLow: entry,
+                                    units
+                                };
+                                waiting = false;
+                                rangeHigh = null;
+                                rangeLow = null;
+                            }
+                        }
+
+                        const monthProfit = trades.reduce((a, t) => a + t.profit, 0);
+                        const monthWins = trades.filter(t => t.profit > 0).length;
+
+                        configResults[resolution][atrMultiplierSL].totalProfit += monthProfit;
+                        configResults[resolution][atrMultiplierSL].totalTrades += trades.length;
+                        configResults[resolution][atrMultiplierSL].wins += monthWins;
+                        configResults[resolution][atrMultiplierSL].monthlyProfits.push({
+                            year: m.year,
+                            month: m.month,
+                            profit: monthProfit,
+                            trades: trades.length
+                        });
+                    }
+                } catch (apiErr) {
+                    console.error(`Error fetching data for ${m.year}-${m.month} res ${resolution}:`, apiErr);
+                }
+            }
+        }
+
+        // Flatten results for sorting
+        const finalResults: any[] = [];
+        for (const resolution of resolutions) {
+            for (const atr of atrMultipliers) {
+                const res = configResults[resolution][atr];
+                finalResults.push({
+                    resolution,
+                    atrMultiplierSL: atr,
+                    totalProfit: res.totalProfit,
+                    totalTrades: res.totalTrades,
+                    winRate: res.totalTrades > 0 ? (res.wins / res.totalTrades) * 100 : 0,
+                    monthlyProfits: res.monthlyProfits
+                });
+            }
+        }
+
+        finalResults.sort((a, b) => b.totalProfit - a.totalProfit);
+
+        res.json({
+            best: finalResults[0] || null,
+            topResults: finalResults.slice(0, 5),
+            totalTested: finalResults.length,
+            periodChecked: `${start.format('MMM YYYY')} to ${now.format('MMM YYYY')}`
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Optimization failed' });
+    }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
