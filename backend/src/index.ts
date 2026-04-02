@@ -45,6 +45,7 @@ app.post('/api/trade/execute', async (req: Request, res: Response) => {
         // Dynamic precision based on pair
         let precision = 6;
         if (pair.includes('DOGE')) precision = 0; // DOGE requires integer quantity
+        if (pair.includes('SHIB')) precision = 0; // SHIB requires integer quantity
         if (pair.includes('ETH')) precision = 5;
 
         // Lot sizing: Use slightly less than 100 to account for fees

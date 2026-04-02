@@ -109,7 +109,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [pair, setPair] = useState("B-BTC_INR");
+  const [pair, setPair] = useState("B-BTC_USDT");
 
   const [selectedStrategyId, setSelectedStrategyId] =
     useState("opening-breakout");
@@ -483,24 +483,27 @@ export default function App() {
                 </div>
 
                 <div className="flex items-center gap-3 bg-slate-900/40 p-1.5 rounded-2xl border border-white/5">
-                  {["B-DOGE_INR", "B-BTC_INR", "B-ETH_INR", "B-BTC_USDT"].map(
-                    (p) => (
-                      <button
-                        key={p}
-                        onClick={() => setPair(p)}
-                        className={cn(
-                          "px-5 py-2.5 rounded-xl text-xs font-black transition-all",
-                          pair === p
-                            ? "bg-blue-600 text-white shadow-xl shadow-blue-600/20"
-                            : "text-slate-500 hover:text-slate-200 hover:bg-white/5",
-                        )}
-                      >
-                        {p.includes("-")
-                          ? p.split("-")[1].replace("_", "/")
-                          : p.replace("_", "/")}
-                      </button>
-                    ),
-                  )}
+                  {[
+                    "B-BTC_USDT",
+                    "B-ETH_USDT",
+                    "B-DOGE_USDT",
+                    "B-SHIB_USDT",
+                  ].map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPair(p)}
+                      className={cn(
+                        "px-5 py-2.5 rounded-xl text-xs font-black transition-all",
+                        pair === p
+                          ? "bg-blue-600 text-white shadow-xl shadow-blue-600/20"
+                          : "text-slate-500 hover:text-slate-200 hover:bg-white/5",
+                      )}
+                    >
+                      {p.includes("-")
+                        ? p.split("-")[1].replace("_", "/")
+                        : p.replace("_", "/")}
+                    </button>
+                  ))}
                 </div>
               </div>
             </header>
