@@ -109,13 +109,13 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [pair, setPair] = useState("B-BTC_USDT");
+  const [pair, setPair] = useState("B-BTC_INR");
 
   const [selectedStrategyId, setSelectedStrategyId] =
     useState("opening-breakout");
 
   // Common Backtest State
-  const [initialCapital, setInitialCapital] = useState(5);
+  const [initialCapital, setInitialCapital] = useState(100);
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [interval, setInterval] = useState("15");
@@ -484,10 +484,10 @@ export default function App() {
 
                 <div className="flex items-center gap-3 bg-slate-900/40 p-1.5 rounded-2xl border border-white/5">
                   {[
-                    "B-BTC_USDT",
-                    "B-ETH_USDT",
-                    "B-DOGE_USDT",
-                    "B-SHIB_USDT",
+                    "B-BTC_INR",
+                    "B-ETH_INR",
+                    "B-DOGE_INR",
+                    "B-SHIB_INR",
                   ].map((p) => (
                     <button
                       key={p}
@@ -511,21 +511,21 @@ export default function App() {
             <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
               <StatCard
                 title="Real-time Avg"
-                value={`$${stats.avgPrice.toLocaleString()}`}
+                value={`₹${stats.avgPrice.toLocaleString()}`}
                 icon={Layers}
                 color="text-blue-400"
                 gradient="from-blue-600/10 to-transparent"
               />
               <StatCard
                 title="Session High"
-                value={`$${stats.maxHigh.toLocaleString()}`}
+                value={`₹${stats.maxHigh.toLocaleString()}`}
                 icon={TrendingUp}
                 color="text-emerald-400"
                 gradient="from-emerald-600/10 to-transparent"
               />
               <StatCard
                 title="Session Low"
-                value={`$${stats.minLow.toLocaleString()}`}
+                value={`₹${stats.minLow.toLocaleString()}`}
                 icon={TrendingDown}
                 color="text-rose-400"
                 gradient="from-rose-600/10 to-transparent"
@@ -567,7 +567,7 @@ export default function App() {
                       <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
                         <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                         <span className="text-[10px] font-black text-emerald-400">
-                          ${tickerPrice.toLocaleString()}
+                          ₹{tickerPrice.toLocaleString()}
                         </span>
                       </div>
                     )}
@@ -599,20 +599,20 @@ export default function App() {
                   <AnimatePresence mode="popLayout">
                     {loading
                       ? Array.from({ length: 6 }).map((_, i) => (
-                          <div
-                            key={i}
-                            className="h-24 w-full bg-white/5 animate-pulse rounded-3xl border border-white/5"
-                          />
-                        ))
+                        <div
+                          key={i}
+                          className="h-24 w-full bg-white/5 animate-pulse rounded-3xl border border-white/5"
+                        />
+                      ))
                       : candles
-                          .slice(0, 15)
-                          .map((candle, idx) => (
-                            <CandleRow
-                              key={candle.time}
-                              candle={candle}
-                              index={idx}
-                            />
-                          ))}
+                        .slice(0, 15)
+                        .map((candle, idx) => (
+                          <CandleRow
+                            key={candle.time}
+                            candle={candle}
+                            index={idx}
+                          />
+                        ))}
                   </AnimatePresence>
                 </div>
               </div>
@@ -785,9 +785,10 @@ export default function App() {
                         </select>
                       </InputGroup>
 
-                      <InputGroup label="Capital ($)" sub="Initial deposit">
+                      <InputGroup label="Capital (₹)" sub="Min ₹100 (Exchange limit)">
                         <input
                           type="number"
+                          min="100"
                           value={initialCapital}
                           onChange={(e) =>
                             setInitialCapital(Number(e.target.value))
@@ -1300,7 +1301,7 @@ export default function App() {
                                                       trade.exitReason === "TP"
                                                         ? "text-emerald-500"
                                                         : trade.exitReason ===
-                                                            "SL"
+                                                          "SL"
                                                           ? "text-rose-500"
                                                           : "text-slate-500",
                                                     )}

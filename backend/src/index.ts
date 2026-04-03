@@ -42,24 +42,97 @@ app.post('/api/trade/execute', async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'Backend API Key and Secret are not configured' });
         }
 
-        // Dynamic precision based on pair
-        let precision = 6;
-        if (pair.includes('DOGE')) precision = 0; // DOGE requires integer quantity
-        if (pair.includes('SHIB')) precision = 0; // SHIB requires integer quantity
-        if (pair.includes('ETH')) precision = 5;
+        if (capital < 100) {
+            return res.status(400).json({ error: 'Minimum order value is ₹100. Please increase your capital.' });
+        }
 
-        // Lot sizing: Use slightly less than 100 to account for fees
-        const tradeAmountINR = 180;
-        const quantity = parseFloat((tradeAmountINR / price).toFixed(precision));
-        console.log(quantity, 'quantity------')
+
+        const testRes = await axios.post('https://api.coindcx.com/exchange/v1/users/balances',
+            JSON.stringify({ timestamp: Date.now() }), {
+            headers: {
+                'X-AUTH-APIKEY': apiKey,
+                'X-AUTH-SIGNATURE': crypto.createHmac('sha256', apiSecret)
+                    .update(JSON.stringify({ timestamp: Date.now() }))
+                    .digest('hex'),
+                'Content-Type': 'application/json'
+            }
+        });
+        console.log('Auth test:', testRes.data);
+
+        const marketsRes = await axios.get('https://api.coindcx.com/exchange/v1/markets_details');
+        // Normalize: "B-SHIB_INR" -> "SHIBINR"
+        const normalizedPair = pair.replace('B-', '').replace('_', '');
+        const market = marketsRes.data.find((m: any) => m.symbol === normalizedPair);
+
+        console.log('Normalized pair:', normalizedPair);
+        console.log('Market config:', JSON.stringify(market, null, 2));
+
+        // ADD THIS to see the raw values
+        console.log('Market config for', pair, JSON.stringify(market, null, 2));
+
+        const quantityPrecision = market?.target_currency_precision ?? 6;  // SHIB = 4
+        const pricePrecision = market?.base_currency_precision ?? 8;
+
+        // Order Sizing Strategy:
+        // Use a 2% safety buffer to overcompensate for fee deductions and rounding.
+        // This ensures the total value stays above the exchange's min_notional (₹100).
+        const buffer = 1.02;
+        const useIntegerQty = quantityPrecision === 0 || ['SHIB', 'DOGE'].some(t => pair.includes(t));
+
+        // Round UP to the nearest precision unit to ensure we never undershoot
+        // Use quantityPrecision for rounding quantity
+        // Use floor instead of ceil for quantity to avoid exceeding capital
+        const step = market?.step ?? 0.00000001;
+        const stepDecimals = (step.toString().split('.')[1] || '').length;
+        const factor = Math.pow(10, stepDecimals);
+        const snappedPrice = Math.round(Math.round(price * factor) / Math.round(step * factor))
+            * Math.round(step * factor) / factor;
+        const formattedPrice = parseFloat(snappedPrice.toFixed(pricePrecision));
+
+
+        // Use ceil not floor — we need total >= min_notional
+        const minNotional = market?.min_notional ?? 100;
+        const rawQty = (minNotional * buffer) / snappedPrice;
+
+        const quantity = useIntegerQty
+            ? Math.ceil(rawQty)  // ceil to ensure we're above min_notional
+            : parseFloat((Math.ceil(rawQty * Math.pow(10, quantityPrecision)) / Math.pow(10, quantityPrecision)).toFixed(quantityPrecision));
+
+        // Verify before sending
+        const orderTotal = quantity * snappedPrice;
+        console.log(`Snapped Price: ${snappedPrice}, Qty: ${quantity}, Total: ${orderTotal.toFixed(2)}`);
+
+        if (orderTotal < minNotional) {
+            return res.status(400).json({
+                error: `Order total ₹${orderTotal.toFixed(2)} is below minimum ₹${minNotional}`
+            });
+        }
+
+        console.log(`Finalizing Order: Capital=${capital}, Qty=${quantity}, Price=${price}, Total=${(quantity * price).toFixed(2)}`);
         const timeStamp = Date.now();
+
+        // Use the correct market identifier from the markets details
+        const marketPair = market?.coindcx_name ?? normalizedPair; // "SHIBINR"
+        // const body = {
+        //     side,
+        //     order_type: orderType,
+        //     market: marketPair, // Use the correct market identifier
+        //     price_per_unit: formattedPrice,
+        //     total_quantity: quantity,
+        //     timestamp: timeStamp,
+        //     client_order_id: `T-${timeStamp}`
+        // };
+        // TEMPORARY DEBUG - hardcode everything to isolate the issue
+        // Try sending price as string
+
+
         const body = {
-            side,
-            order_type: orderType,
-            market: pair,
-            price_per_unit: price,
-            total_quantity: quantity,
-            timestamp: timeStamp,
+            side: "buy",
+            order_type: "limit_order",
+            market: "SHIBINR",
+            price_per_unit: 0.0006,
+            total_quantity: 170000,
+            timestamp: timeStamp,  // ✅ same timestamp
             client_order_id: `T-${timeStamp}`
         };
 
@@ -69,14 +142,18 @@ app.post('/api/trade/execute', async (req: Request, res: Response) => {
             .update(bodyString)
             .digest('hex');
 
+        // Log marketPair not the original pair variable
+        console.log('Market:', marketPair);
+        console.log('Body String:', JSON.stringify(body));
+
+
         console.log('--- EXECUTING LIVE TRADE ---');
         console.log('Market:', pair);
         console.log('orderType:', orderType);
         console.log('Side:', side);
-        console.log('Price:', price);
+        console.log('Price:', body.price_per_unit);
         console.log('Capital Used:', capital);
         console.log('Quantity:', quantity);
-        console.log('Precision Used:', precision);
         console.log('Body String:', bodyString);
         console.log('---------------------------');
 
@@ -165,13 +242,16 @@ app.get('/api/market-data', async (req: Request, res: Response) => {
         const now = Math.floor(Date.now() / 1000);
         const yesterday = now - (24 * 60 * 60);
 
-        const params = {
+        const params: any = {
             pair,
             from: Number(from || yesterday),
             to: Number(to || now),
             resolution: String(resolution),
-            pcode: 'f'
         };
+
+        if (String(pair).includes('USDT')) {
+            params.pcode = 'f';
+        }
 
         const response = await axios.get(COINDCX_URL, { params });
         res.json(response.data);
@@ -336,7 +416,7 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
 
             try {
                 const response = await axios.get(COINDCX_URL, {
-                    params: { pair, from: dataFetchStartUnix, to: endUnix, resolution, pcode: 'f' }
+                    params: { pair, from: dataFetchStartUnix, to: endUnix, resolution, ...(pair.includes('USDT') ? { pcode: 'f' } : {}) }
                 });
 
                 if (response.data.s === 'ok' && Array.isArray(response.data.data)) {
@@ -531,7 +611,7 @@ app.post('/api/backtest/optimize', async (req: Request, res: Response) => {
             for (const resolution of resolutions) {
                 try {
                     const response = await axios.get(COINDCX_URL, {
-                        params: { pair, from: dataFetchStartUnix, to: endUnix, resolution, pcode: 'f' }
+                        params: { pair, from: dataFetchStartUnix, to: endUnix, resolution, ...(pair.includes('USDT') ? { pcode: 'f' } : {}) }
                     });
 
                     if (response.data.s !== 'ok' || !Array.isArray(response.data.data)) {
