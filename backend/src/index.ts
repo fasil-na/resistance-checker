@@ -8,6 +8,8 @@ import timezone from 'dayjs/plugin/timezone.js';
 import crypto from 'crypto';
 
 import dummyData from './data/dummy_15m.json' with { type: 'json' };
+import { strategies } from './strategies/index.js';
+import type { Candle, Trade } from './types/index.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -33,7 +35,6 @@ function createSignature(payload: any, secret: string) {
 
 app.post('/api/trade/execute', async (req: Request, res: Response) => {
     try {
-        console.log('hitting----')
         const apiKey = process.env.COINDCX_API_KEY;
         const apiSecret = process.env.COINDCX_API_SECRET;
         const { side, pair, price, capital = 100, orderType = "limit_order" } = req.body;
@@ -42,26 +43,33 @@ app.post('/api/trade/execute', async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'Backend API Key and Secret are not configured' });
         }
 
-        // Dynamic precision based on pair
-        let precision = 6;
-        if (pair.includes('DOGE')) precision = 0; // DOGE requires integer quantity
-        if (pair.includes('SHIB')) precision = 0; // SHIB requires integer quantity
-        if (pair.includes('ETH')) precision = 5;
+        // Fetch market details to get precision
+        const marketDetailsResponse = await axios.get('https://apigw.coindcx.com/exchange/v1/markets_details');
+        const marketDetails = marketDetailsResponse.data.find((m: any) => m.coindcx_name === 'DOGEINR');
 
-        // Lot sizing: Use slightly less than 100 to account for fees
-        const tradeAmountINR = 180;
-        const quantity = parseFloat((tradeAmountINR / price).toFixed(precision));
-        console.log(quantity, 'quantity------')
+        console.log(marketDetails, 'marketDetails------')
+
+        if (!marketDetails) {
+            return res.status(404).json({ error: 'Market details not found for DOGEINR' });
+        }
+
+        const targetPrecision = marketDetails.target_currency_precision;
+        const basePrecision = marketDetails.base_currency_precision;
+
+        // Lot sizing: Static values for DOGEINR trade with dynamic precision
+        const quantity = (12).toFixed(targetPrecision).toString();
+        const newPrice = (8.5).toFixed(basePrecision).toString();
         const timeStamp = Date.now();
         const body = {
             side,
-            order_type: orderType,
-            market: pair,
-            price_per_unit: price,
+            order_type: "market_order",
+            market: 'DOGEINR',
+            price_per_unit: newPrice,
             total_quantity: quantity,
             timestamp: timeStamp,
             client_order_id: `T-${timeStamp}`
         };
+        console.log(body, 'body-----')
 
         const bodyString = JSON.stringify(body);
         const signature = crypto
@@ -69,18 +77,9 @@ app.post('/api/trade/execute', async (req: Request, res: Response) => {
             .update(bodyString)
             .digest('hex');
 
-        console.log('--- EXECUTING LIVE TRADE ---');
-        console.log('Market:', pair);
-        console.log('orderType:', orderType);
-        console.log('Side:', side);
-        console.log('Price:', price);
-        console.log('Capital Used:', capital);
-        console.log('Quantity:', quantity);
-        console.log('Precision Used:', precision);
-        console.log('Body String:', bodyString);
         console.log('---------------------------');
 
-        const response = await axios.post('https://api.coindcx.com/exchange/v1/orders/create', bodyString, {
+        const response = await axios.post('https://apigw.coindcx.com/exchange/v1/orders/create', bodyString, {
             headers: {
                 'X-AUTH-APIKEY': apiKey,
                 'X-AUTH-SIGNATURE': signature,
@@ -145,11 +144,12 @@ app.post('/api/user/balances', async (req: Request, res: Response) => {
 });
 
 app.get('/api/strategies', (_req: Request, res: Response) => {
-    const strategies = [
-        { id: 'opening-breakout', name: 'Opening Breakout' },
-        { id: 'ma-crossover', name: 'MA Crossover' }
-    ];
-    res.json(strategies);
+    const strategyList = Object.values(strategies).map(s => ({
+        id: s.id,
+        name: s.name,
+        description: s.description
+    }));
+    res.json(strategyList);
 });
 
 app.get('/api/market-data', async (req: Request, res: Response) => {
@@ -201,78 +201,6 @@ app.get('/api/ticker', async (req: Request, res: Response) => {
     }
 });
 
-interface Candle {
-    time: number;
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-    volume: number;
-}
-
-interface Trade {
-    rangeHigh?: number;
-    rangeLow?: number;
-    breakoutTime?: string;
-    entryTime: string;
-    exitTime?: string;
-    direction: 'buy' | 'sell';
-    entryPrice: number;
-    exitPrice?: number;
-    sl: number;
-    tp?: number;
-    status: 'open' | 'closed';
-    profit: number;
-    exitReason?: string;
-    lastHigh?: number;
-    lastLow?: number;
-    units?: number; // position size based on capital
-    fee?: number;   // total fees for this trade
-}
-
-// --- EMA ---
-function calculateEMA(data: number[], period: number, index: number): number {
-    const k = 2 / (period + 1);
-    const startIdx = Math.max(0, index - period);
-    let ema = data[startIdx] || 0;
-    for (let i = startIdx + 1; i <= index; i++) {
-        const val = data[i] || 0;
-        ema = val * k + ema * (1 - k);
-    }
-    return ema;
-}
-
-
-function avgVolume(candles: Candle[], i: number, period = 20): number {
-    let sum = 0;
-    let count = 0;
-
-    for (let j = Math.max(0, i - period); j < i; j++) {
-        const c = candles[j];
-        if (c) {
-            sum += c.volume;
-            count++;
-        }
-    }
-
-    return count > 0 ? sum / count : 0;
-}
-// --- ATR Calculation ---
-function calculateATR(candles: Candle[], period = 14, index: number): number {
-    let trs: number[] = [];
-    for (let i = index - period + 1; i <= index; i++) {
-        const c = candles[i];
-        const prev = candles[i - 1];
-        if (!c || !prev) continue;
-        const tr = Math.max(
-            c.high - c.low,
-            Math.abs(c.high - prev.close),
-            Math.abs(c.low - prev.close)
-        );
-        trs.push(tr);
-    }
-    return trs.reduce((a, b) => a + b, 0) / (trs.length || 1);
-}
 
 app.post('/api/backtest', async (req: Request, res: Response) => {
     try {
@@ -289,7 +217,7 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
             pair = "B-BTC_USDT",
             capitalPerTrade = 1,
             resolution = "5",
-            atrMultiplierSL = 1,
+            atrMultiplierSL = 10,
             feeRate = 0.0002
         } = req.body;
 
@@ -341,121 +269,16 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
 
                 if (response.data.s === 'ok' && Array.isArray(response.data.data)) {
                     const candles: Candle[] = response.data.data.sort((a: Candle, b: Candle) => a.time - b.time);
-                    const closes = candles.map(c => c.close);
 
-                    let currentTrade: Trade | null = null;
-                    let rangeHigh: number | null = null;
-                    let rangeLow: number | null = null;
-                    let waiting = false;
-                    let direction: 'buy' | 'sell' | null = null;
-                    let lastBreakoutTime: string | null = null;
+                    const strategyId = req.body.strategyId || 'opening-breakout';
+                    const strategy = strategies[strategyId];
 
-                    for (let i = 50; i < candles.length; i++) {
-                        const c = candles[i];
-                        if (!c || c.time < simulationStartUnix * 1000) continue;
-                        const time = dayjs(c.time).tz('Asia/Kolkata');
-
-                        if (!rangeHigh && !rangeLow) {
-                            const prev1 = candles[i - 1];
-                            const prev2 = candles[i - 2];
-                            if (prev1 && prev2) {
-                                rangeHigh = Math.max(prev1.high, prev2.high);
-                                rangeLow = Math.min(prev1.low, prev2.low);
-                            }
-                        }
-                        if (rangeHigh === null || rangeLow === null) continue;
-
-                        const ema20 = calculateEMA(closes, 20, i);
-                        const ema50 = calculateEMA(closes, 50, i);
-                        if (Math.abs(ema20 - ema50) < 15) continue;
-
-                        const body = Math.abs(c.close - c.open);
-                        const range = c.high - c.low;
-                        if (range <= 0 || body / range <= 0.6) continue;
-                        if (c.volume <= avgVolume(candles, i) * 1.3) continue;
-                        if (Math.abs(c.close - ema20) < 10) continue;
-
-                        if (currentTrade) {
-                            if (currentTrade.direction === 'buy') {
-                                const lastHigh = currentTrade.lastHigh ?? currentTrade.entryPrice;
-                                if (c.high > lastHigh) {
-                                    const move = c.high - lastHigh;
-                                    currentTrade.sl += move;
-                                    currentTrade.lastHigh = c.high;
-                                }
-                                if (c.close <= currentTrade.sl) {
-                                    currentTrade.exitPrice = currentTrade.sl;
-                                    currentTrade.exitReason = 'SL';
-                                    currentTrade.status = 'closed';
-                                }
-                            } else {
-                                const lastLow = currentTrade.lastLow ?? currentTrade.entryPrice;
-                                if (c.low < lastLow) {
-                                    const move = lastLow - c.low;
-                                    currentTrade.sl -= move;
-                                    currentTrade.lastLow = c.low;
-                                }
-                                if (c.close >= currentTrade.sl) {
-                                    currentTrade.exitPrice = currentTrade.sl;
-                                    currentTrade.exitReason = 'SL';
-                                    currentTrade.status = 'closed';
-                                }
-                            }
-
-                            if (currentTrade.status === 'closed') {
-                                currentTrade.exitTime = time.toISOString();
-                                const units = currentTrade.units || 0;
-                                const grossProfit = currentTrade.direction === 'buy'
-                                    ? (currentTrade.exitPrice! - currentTrade.entryPrice) * units
-                                    : (currentTrade.entryPrice - currentTrade.exitPrice!) * units;
-
-                                const entryVal = currentTrade.entryPrice * units;
-                                const exitVal = (currentTrade.exitPrice || 0) * units;
-                                const fee = (entryVal + exitVal) * feeRate;
-
-                                currentTrade.fee = fee;
-                                currentTrade.profit = grossProfit - fee;
-                                allTrades.push(currentTrade);
-                                currentTrade = null;
-                            }
-                            continue;
-                        }
-
-                        if (!waiting) {
-                            if (c.high > rangeHigh && ema20 > ema50) {
-                                direction = 'buy';
-                                waiting = true;
-                                lastBreakoutTime = time.toISOString();
-                            } else if (c.low < rangeLow && ema20 < ema50) {
-                                direction = 'sell';
-                                waiting = true;
-                                lastBreakoutTime = time.toISOString();
-                            }
-                        } else {
-                            const entry = c.close;
-                            const atr = calculateATR(candles, 14, i);
-                            const sl = direction === 'buy' ? entry - atr * atrMultiplierSL : entry + atr * atrMultiplierSL;
-                            const riskPerUnit = Math.abs(entry - sl);
-                            const units = riskPerUnit > 0 ? capitalPerTrade / riskPerUnit : 0;
-
-                            currentTrade = {
-                                rangeHigh,
-                                rangeLow,
-                                breakoutTime: lastBreakoutTime || time.toISOString(),
-                                entryTime: time.toISOString(),
-                                direction: direction!,
-                                entryPrice: entry,
-                                sl,
-                                status: 'open',
-                                profit: 0,
-                                lastHigh: entry,
-                                lastLow: entry,
-                                units
-                            };
-                            waiting = false;
-                            rangeHigh = null;
-                            rangeLow = null;
-                        }
+                    if (strategy) {
+                        const trades = strategy.run(candles, {
+                            ...req.body,
+                            simulationStartUnix
+                        });
+                        allTrades.push(...trades);
                     }
                 }
             } catch (err) {
@@ -539,112 +362,19 @@ app.post('/api/backtest/optimize', async (req: Request, res: Response) => {
                     }
 
                     const candles: Candle[] = response.data.data.sort((a: Candle, b: Candle) => a.time - b.time);
-                    const closes = candles.map(c => c.close);
+
+                    const strategyId = req.body.strategyId || 'opening-breakout';
+                    const strategy = strategies[strategyId];
+
+                    if (!strategy) continue;
 
                     for (const atrMultiplierSL of atrMultipliers) {
-                        let trades: Trade[] = [];
-                        let currentTrade: Trade | null = null;
-                        let rangeHigh: number | null = null;
-                        let rangeLow: number | null = null;
-                        let waiting = false;
-                        let direction: 'buy' | 'sell' | null = null;
-
-                        for (let i = 50; i < candles.length; i++) {
-                            const c = candles[i];
-                            if (!c || c.time < simulationStartUnix * 1000) continue;
-
-                            if (!rangeHigh && !rangeLow) {
-                                const p1 = candles[i - 1];
-                                const p2 = candles[i - 2];
-                                if (p1 && p2) {
-                                    rangeHigh = Math.max(p1.high, p2.high);
-                                    rangeLow = Math.min(p1.low, p2.low);
-                                }
-                            }
-                            if (rangeHigh === null || rangeLow === null) continue;
-
-                            const ema20 = calculateEMA(closes, 20, i);
-                            const ema50 = calculateEMA(closes, 50, i);
-                            if (Math.abs(ema20 - ema50) < 15) continue;
-
-                            const body = Math.abs(c.close - c.open);
-                            const range = c.high - c.low;
-                            if (range <= 0 || body / range <= 0.6) continue;
-                            if (c.volume <= avgVolume(candles, i) * 1.3) continue;
-                            if (Math.abs(c.close - ema20) < 10) continue;
-
-                            if (currentTrade) {
-                                if (currentTrade.direction === 'buy') {
-                                    const lastHigh = currentTrade.lastHigh ?? currentTrade.entryPrice;
-                                    if (c.high > lastHigh) {
-                                        const move = c.high - lastHigh;
-                                        currentTrade.sl += move;
-                                        currentTrade.lastHigh = c.high;
-                                    }
-                                    if (c.close <= currentTrade.sl) {
-                                        currentTrade.exitPrice = currentTrade.sl;
-                                        currentTrade.status = 'closed';
-                                    }
-                                } else {
-                                    const lastLow = currentTrade.lastLow ?? currentTrade.entryPrice;
-                                    if (c.low < lastLow) {
-                                        const move = lastLow - c.low;
-                                        currentTrade.sl -= move;
-                                        currentTrade.lastLow = c.low;
-                                    }
-                                    if (c.close >= currentTrade.sl) {
-                                        currentTrade.exitPrice = currentTrade.sl;
-                                        currentTrade.status = 'closed';
-                                    }
-                                }
-
-                                if (currentTrade.status === 'closed') {
-                                    const units = currentTrade.units || 0;
-                                    const gross = currentTrade.direction === 'buy'
-                                        ? (currentTrade.exitPrice! - currentTrade.entryPrice) * units
-                                        : (currentTrade.entryPrice - currentTrade.exitPrice!) * units;
-                                    const entryVal = currentTrade.entryPrice * units;
-                                    const exitVal = (currentTrade.exitPrice || 0) * units;
-                                    const fee = (entryVal + exitVal) * feeRate;
-
-                                    currentTrade.profit = gross - fee;
-                                    trades.push(currentTrade);
-                                    currentTrade = null;
-                                }
-                                continue;
-                            }
-
-                            if (!waiting) {
-                                if (c.high > rangeHigh && ema20 > ema50) {
-                                    direction = 'buy';
-                                    waiting = true;
-                                } else if (c.low < rangeLow && ema20 < ema50) {
-                                    direction = 'sell';
-                                    waiting = true;
-                                }
-                            } else {
-                                const entry = c.close;
-                                const atr = calculateATR(candles, 14, i);
-                                const sl = direction === 'buy' ? entry - atr * atrMultiplierSL : entry + atr * atrMultiplierSL;
-                                const riskPerUnit = Math.abs(entry - sl);
-                                const units = riskPerUnit > 0 ? capitalPerTrade / riskPerUnit : 0;
-
-                                currentTrade = {
-                                    entryTime: dayjs(c.time).toISOString(),
-                                    direction: direction!,
-                                    entryPrice: entry,
-                                    sl,
-                                    status: 'open',
-                                    profit: 0,
-                                    lastHigh: entry,
-                                    lastLow: entry,
-                                    units
-                                };
-                                waiting = false;
-                                rangeHigh = null;
-                                rangeLow = null;
-                            }
-                        }
+                        const trades = strategy.run(candles, {
+                            ...req.body,
+                            resolution,
+                            atrMultiplierSL,
+                            simulationStartUnix
+                        });
 
                         const monthProfit = trades.reduce((a, t) => a + t.profit, 0);
                         const monthWins = trades.filter(t => t.profit > 0).length;

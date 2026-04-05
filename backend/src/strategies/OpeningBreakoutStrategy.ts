@@ -10,236 +10,176 @@ dayjs.extend(timezone);
 export class OpeningBreakoutStrategy implements Strategy {
     id = 'opening-breakout';
     name = 'Opening Breakout';
-    description = 'Trades based on the high/low of an opening time window.';
+    description = 'Trades based on the high/low of an opening time window with EMA and ATR filters.';
 
     run(candles: Candle[], params: Record<string, any>): Trade[] {
-        if (candles.length < 3) return [];
+        if (candles.length < 50) return [];
 
         const {
-            rangeHour = 4,
-            rangeMinute = 0,
-            cutoffHour = 2,
-            cutoffMinute = 15,
-            buffer = 2,
-            riskReward = 1.2,
-            useTrailingSL = false,
-            resolution = '15'
+            capitalPerTrade = 1,
+            atrMultiplierSL = 0.4,
+            feeRate = 0.0002,
+            simulationStartUnix = 0
         } = params;
 
-        let trades: Trade[] = [];
+        const closes = candles.map(c => c.close);
+        let allTrades: Trade[] = [];
         let currentTrade: Trade | null = null;
-        let today: string | null = null;
         let rangeHigh: number | null = null;
         let rangeLow: number | null = null;
-        let breakCandleHigh: number | null = null;
-        let breakCandleLow: number | null = null;
-        let waitingForWickBreak = false;
-        let breakoutDirection: 'buy' | 'sell' | null = null;
-        let breakoutTimeStr: string | null = null;
-        let priceReturnedToRange = false;
+        let waiting = false;
+        let direction: 'buy' | 'sell' | null = null;
+        let lastBreakoutTime: string | null = null;
 
-        for (let i = 2; i < candles.length; i++) {
-            const candle = candles[i]!;
-            const prevCandle = candles[i - 1]!;
-            const prevPrevCandle = candles[i - 2]!;
+        for (let i = 50; i < candles.length; i++) {
+            const c = candles[i];
+            if (!c || (simulationStartUnix && c.time < simulationStartUnix * 1000)) continue;
+            const time = dayjs(c.time).tz('Asia/Kolkata');
 
-            const time = dayjs(candle.time).tz('Asia/Kolkata');
-            const dateStr = time.format('YYYY-MM-DD');
-
-            // --- RESET AT START OF EACH DAY ---
-            if (dateStr !== today) {
-                today = dateStr;
-                if (currentTrade) {
-                    currentTrade.exitPrice = candle.open;
-                    currentTrade.exitTime = time.toISOString();
-                    currentTrade.profit = currentTrade.direction === 'buy' ? currentTrade.exitPrice! - currentTrade.entryPrice : currentTrade.entryPrice - currentTrade.exitPrice!;
-                    currentTrade.status = 'closed';
-                    currentTrade.exitReason = 'DayReset';
-                    trades.push(currentTrade);
-                    currentTrade = null;
+            if (!rangeHigh && !rangeLow) {
+                const prev1 = candles[i - 1];
+                const prev2 = candles[i - 2];
+                if (prev1 && prev2) {
+                    rangeHigh = Math.max(prev1.high, prev2.high);
+                    rangeLow = Math.min(prev1.low, prev2.low);
                 }
-                rangeHigh = null;
-                rangeLow = null;
-                breakCandleHigh = null;
-                breakCandleLow = null;
-                waitingForWickBreak = false;
-                breakoutDirection = null;
-                priceReturnedToRange = false;
-                breakoutTimeStr = null;
             }
+            if (rangeHigh === null || rangeLow === null) continue;
 
-            // --- CUTOFF ---
-            if (time.hour() === cutoffHour && time.minute() === cutoffMinute) {
-                if (currentTrade) {
-                    currentTrade.exitPrice = candle.open;
-                    currentTrade.exitTime = time.toISOString();
-                    currentTrade.profit = currentTrade.direction === 'buy' ? currentTrade.exitPrice! - currentTrade.entryPrice : currentTrade.entryPrice - currentTrade.exitPrice!;
-                    currentTrade.status = 'closed';
-                    currentTrade.exitReason = 'Cutoff';
-                    trades.push(currentTrade);
-                    currentTrade = null;
-                }
-                continue;
-            }
+            const ema20 = this.calculateEMA(closes, 20, i);
+            const ema50 = this.calculateEMA(closes, 50, i);
+            if (Math.abs(ema20 - ema50) < 15) continue;
 
-            // --- DEFINE RANGE ---
-            if (time.hour() === rangeHour && time.minute() === rangeMinute && !rangeHigh) {
-                rangeHigh = Math.max(prevPrevCandle.high, prevCandle.high);
-                rangeLow = Math.min(prevPrevCandle.low, prevCandle.low);
-                priceReturnedToRange = true;
-            }
-
-            if (!rangeHigh || !rangeLow) continue;
+            const body = Math.abs(c.close - c.open);
+            const range = c.high - c.low;
+            if (range <= 0 || body / range <= 0.6) continue;
+            if (c.volume <= this.avgVolume(candles, i) * 1.3) continue;
+            if (Math.abs(c.close - ema20) < 10) continue;
 
             if (currentTrade) {
-                // Check SL/TP
                 if (currentTrade.direction === 'buy') {
-                    if (candle.low <= currentTrade.sl!) {
-                        currentTrade.exitPrice = currentTrade.sl;
-                        currentTrade.status = 'closed';
+                    const lastHigh = currentTrade.lastHigh ?? currentTrade.entryPrice;
+                    if (c.high > lastHigh) {
+                        const move = c.high - lastHigh;
+                        currentTrade.sl! += move;
+                        currentTrade.lastHigh = c.high;
+                    }
+                    if (c.close <= currentTrade.sl!) {
+                        currentTrade.exitPrice = currentTrade.sl!;
                         currentTrade.exitReason = 'SL';
-                    } else if (candle.high >= currentTrade.tp! && !useTrailingSL) {
-                        currentTrade.exitPrice = currentTrade.tp;
                         currentTrade.status = 'closed';
-                        currentTrade.exitReason = 'TP';
                     }
                 } else {
-                    if (candle.high >= currentTrade.sl!) {
-                        currentTrade.exitPrice = currentTrade.sl;
-                        currentTrade.status = 'closed';
-                        currentTrade.exitReason = 'SL';
-                    } else if (candle.low <= currentTrade.tp! && !useTrailingSL) {
-                        currentTrade.exitPrice = currentTrade.tp;
-                        currentTrade.status = 'closed';
-                        currentTrade.exitReason = 'TP';
+                    const lastLow = currentTrade.lastLow ?? currentTrade.entryPrice;
+                    if (c.low < lastLow) {
+                        const move = lastLow - c.low;
+                        currentTrade.sl! -= move;
+                        currentTrade.lastLow = c.low;
                     }
-                }
-
-                // --- DYNAMIC TRAILING SL ---
-                if (currentTrade.status === 'open' && useTrailingSL) {
-                    if (currentTrade.direction === 'buy') {
-                        // If price makes a new high, move SL up by the same amount
-                        if (candle.high > currentTrade.lastHigh!) {
-                            const move = candle.high - currentTrade.lastHigh!;
-                            currentTrade.sl! += move;
-                            currentTrade.lastHigh = candle.high;
-                        }
-                    } else {
-                        // If price makes a new low, move SL down by the same amount
-                        if (candle.low < currentTrade.lastLow!) {
-                            const move = currentTrade.lastLow! - candle.low;
-                            currentTrade.sl! -= move;
-                            currentTrade.lastLow = candle.low;
-                        }
+                    if (c.close >= currentTrade.sl!) {
+                        currentTrade.exitPrice = currentTrade.sl!;
+                        currentTrade.exitReason = 'SL';
+                        currentTrade.status = 'closed';
                     }
                 }
 
                 if (currentTrade.status === 'closed') {
                     currentTrade.exitTime = time.toISOString();
-                    currentTrade.profit = currentTrade.direction === 'buy' ? currentTrade.exitPrice! - currentTrade.entryPrice : currentTrade.entryPrice - currentTrade.exitPrice!;
-                    trades.push(currentTrade);
+                    const units = currentTrade.units || 0;
+                    const grossProfit = currentTrade.direction === 'buy'
+                        ? (currentTrade.exitPrice! - currentTrade.entryPrice) * units
+                        : (currentTrade.entryPrice - currentTrade.exitPrice!) * units;
+
+                    const entryVal = currentTrade.entryPrice * units;
+                    const exitVal = (currentTrade.exitPrice || 0) * units;
+                    const fee = (entryVal + exitVal) * feeRate;
+
+                    currentTrade.fee = fee;
+                    currentTrade.profit = grossProfit - fee;
+                    allTrades.push(currentTrade);
                     currentTrade = null;
                 }
                 continue;
             }
 
-            // --- TRACK IF PRICE RETURNED TO RANGE ---
-            if (candle.close >= rangeLow && candle.close <= rangeHigh) {
-                priceReturnedToRange = true;
-            }
-
-            // --- STEP 1: DETECT BREAKOUT ---
-            if (!waitingForWickBreak) {
-                if (!priceReturnedToRange) continue;
-
-                const brkBody = Math.abs(candle.close - candle.open);
-                const brkRange = candle.high - candle.low;
-                if (brkRange === 0 || (brkBody / brkRange) < 0.5) continue;
-
-                if (candle.close > rangeHigh + buffer) {
-                    breakoutDirection = 'buy';
-                    breakCandleHigh = candle.high;
-                    breakCandleLow = candle.low;
-                    waitingForWickBreak = true;
-                    priceReturnedToRange = false;
-                    breakoutTimeStr = dayjs(candle.time).tz('Asia/Kolkata').toISOString();
-                } else if (candle.close < rangeLow - buffer) {
-                    breakoutDirection = 'sell';
-                    breakCandleHigh = candle.high;
-                    breakCandleLow = candle.low;
-                    waitingForWickBreak = true;
-                    priceReturnedToRange = false;
-                    breakoutTimeStr = dayjs(candle.time).tz('Asia/Kolkata').toISOString();
+            if (!waiting) {
+                if (c.high > rangeHigh && ema20 > ema50) {
+                    direction = 'buy';
+                    waiting = true;
+                    lastBreakoutTime = time.toISOString();
+                } else if (c.low < rangeLow && ema20 < ema50) {
+                    direction = 'sell';
+                    waiting = true;
+                    lastBreakoutTime = time.toISOString();
                 }
-            }
-            // --- STEP 2: NEXT CANDLE ENTRY ---
-            else if (waitingForWickBreak) {
-                const resInMs = parseInt(resolution) * 60 * 1000;
-                if (candle.time > dayjs(breakoutTimeStr).valueOf() + resInMs) {
-                    waitingForWickBreak = false;
-                    continue;
-                }
+            } else {
+                const entry = c.close;
+                const atr = this.calculateATR(candles, 14, i);
+                const sl = direction === 'buy' ? entry - atr * atrMultiplierSL : entry + atr * atrMultiplierSL;
+                const riskPerUnit = Math.abs(entry - sl);
+                const units = riskPerUnit > 0 ? capitalPerTrade / riskPerUnit : 0;
 
-                const riskVal = breakCandleHigh! - breakCandleLow!;
-                if (riskVal <= 0) {
-                    waitingForWickBreak = false;
-                    continue;
-                }
-
-                const body = Math.abs(candle.close - candle.open);
-                const range = candle.high - candle.low;
-                if (range === 0 || (body / range) < 0.4) continue;
-
-                if (breakoutDirection === 'buy' && candle.high >= breakCandleHigh!) {
-                    const sl = breakCandleLow! - buffer;
-                    const risk = breakCandleHigh! - sl;
-                    currentTrade = {
-                        breakoutTime: breakoutTimeStr!,
-                        entryTime: time.toISOString(),
-                        direction: 'buy',
-                        entryPrice: breakCandleHigh!,
-                        profit: 0,
-                        status: 'open',
-                        sl: sl,
-                        tp: breakCandleHigh! + (risk * riskReward),
-                        lastHigh: candle.high,
-                        lastLow: candle.low,
-                        initialRisk: risk
-                    };
-                    waitingForWickBreak = false;
-                } else if (breakoutDirection === 'sell' && candle.low <= breakCandleLow!) {
-                    const sl = breakCandleHigh! + buffer;
-                    const risk = sl - breakCandleLow!;
-                    currentTrade = {
-                        breakoutTime: breakoutTimeStr!,
-                        entryTime: time.toISOString(),
-                        direction: 'sell',
-                        entryPrice: breakCandleLow!,
-                        profit: 0,
-                        status: 'open',
-                        sl: sl,
-                        tp: breakCandleLow! - (risk * riskReward),
-                        lastHigh: candle.high,
-                        lastLow: candle.low,
-                        initialRisk: risk
-                    };
-                    waitingForWickBreak = false;
-                }
+                currentTrade = {
+                    rangeHigh,
+                    rangeLow,
+                    breakoutTime: lastBreakoutTime || time.toISOString(),
+                    entryTime: time.toISOString(),
+                    direction: direction!,
+                    entryPrice: entry,
+                    sl,
+                    status: 'open',
+                    profit: 0,
+                    lastHigh: entry,
+                    lastLow: entry,
+                    units
+                };
+                waiting = false;
+                rangeHigh = null;
+                rangeLow = null;
             }
         }
 
-        // Close any remaining open trade
-        if (currentTrade) {
-            const lastCandle = candles[candles.length - 1]!;
-            currentTrade.exitPrice = lastCandle.close;
-            currentTrade.exitTime = dayjs(lastCandle.time).tz('Asia/Kolkata').toISOString();
-            currentTrade.profit = currentTrade.direction === 'buy' ? currentTrade.exitPrice! - currentTrade.entryPrice : currentTrade.entryPrice - currentTrade.exitPrice!;
-            currentTrade.status = 'closed';
-            currentTrade.exitReason = 'DayReset';
-            trades.push(currentTrade);
-            currentTrade = null;
-        }
+        return allTrades;
+    }
 
-        return trades;
+    private calculateEMA(data: number[], period: number, index: number): number {
+        const k = 2 / (period + 1);
+        const startIdx = Math.max(0, index - period);
+        let ema = data[startIdx] || 0;
+        for (let i = startIdx + 1; i <= index; i++) {
+            const val = data[i] || 0;
+            ema = val * k + ema * (1 - k);
+        }
+        return ema;
+    }
+
+    private avgVolume(candles: Candle[], i: number, period = 20): number {
+        let sum = 0;
+        let count = 0;
+        for (let j = Math.max(0, i - period); j < i; j++) {
+            const c = candles[j];
+            if (c) {
+                sum += c.volume;
+                count++;
+            }
+        }
+        return count > 0 ? sum / count : 0;
+    }
+
+    private calculateATR(candles: Candle[], period = 14, index: number): number {
+        let trs: number[] = [];
+        for (let i = index - period + 1; i <= index; i++) {
+            const c = candles[i];
+            const prev = candles[i - 1];
+            if (!c || !prev) continue;
+            const tr = Math.max(
+                c.high - c.low,
+                Math.abs(c.high - prev.close),
+                Math.abs(c.low - prev.close)
+            );
+            trs.push(tr);
+        }
+        return trs.reduce((a, b) => a + b, 0) / (trs.length || 1);
     }
 }
+

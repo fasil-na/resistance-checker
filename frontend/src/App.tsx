@@ -1,4 +1,10 @@
-import React, { useEffect, useState, useMemo, useRef } from "react";
+import React, {
+  useEffect,
+  useState,
+  useMemo,
+  useRef,
+  useCallback,
+} from "react";
 import axios from "axios";
 import dayjs from "dayjs";
 import { motion, AnimatePresence } from "framer-motion";
@@ -6,7 +12,9 @@ import {
   createChart,
   ColorType,
   CandlestickSeries,
+  LineSeries,
   LineStyle,
+  AreaSeries,
 } from "lightweight-charts";
 import {
   TrendingUp,
@@ -18,14 +26,14 @@ import {
   Shield,
   Zap,
   RefreshCw,
-  Layers,
   Settings2,
   Play,
   PieChart,
   AlertCircle,
-  Info,
   Eye,
   X,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -57,6 +65,7 @@ interface Trade {
   exitReason?: string;
   units?: number;
   sl: number;
+  tp?: number;
 }
 
 interface BacktestResponse {
@@ -104,25 +113,42 @@ interface Strategy {
 const API_BASE_URL = "http://localhost:5001/api";
 
 export default function App() {
-  const [view, setView] = useState<"live" | "backtest">("live");
+  const [view, setView] = useState<"backtest" | "trade">("trade");
   const [candles, setCandles] = useState<Candle[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const [pair, setPair] = useState("B-BTC_USDT");
-
-  const [selectedStrategyId, setSelectedStrategyId] =
-    useState("opening-breakout");
-
-  // Common Backtest State
-  const [initialCapital, setInitialCapital] = useState(5);
-  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
-  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
-  const [interval, setInterval] = useState("15");
-  const [liveInterval, setLiveInterval] = useState("60");
+  const [pair, setPair] = useState(
+    () => localStorage.getItem("trade_pair") || "B-BTC_USDT",
+  );
+  const [selectedStrategyId, setSelectedStrategyId] = useState(
+    () => localStorage.getItem("trade_strategy") || "opening-breakout",
+  );
+  const [initialCapital, setInitialCapital] = useState(
+    () => Number(localStorage.getItem("trade_capital")) || 5,
+  );
+  const [liveInterval, setLiveInterval] = useState(
+    () => localStorage.getItem("trade_interval") || "60",
+  );
   const [isLiveMonitoring, setIsLiveMonitoring] = useState(false);
   const [isLiveTrading, setIsLiveTrading] = useState(false);
   const [tickerPrice, setTickerPrice] = useState<number | null>(null);
+
+  // Common Backtest State (Restored)
+  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+  const [interval, setInterval] = useState("15");
+
+  // Persistence Effects
+  useEffect(() => {
+    localStorage.setItem("trade_pair", pair);
+  }, [pair]);
+  useEffect(() => {
+    localStorage.setItem("trade_strategy", selectedStrategyId);
+  }, [selectedStrategyId]);
+  useEffect(() => {
+    localStorage.setItem("trade_capital", initialCapital.toString());
+  }, [initialCapital]);
+  useEffect(() => {
+    localStorage.setItem("trade_interval", liveInterval);
+  }, [liveInterval]);
 
   // MA Crossover Specific State
   const [shortPeriod, setShortPeriod] = useState(9);
@@ -138,8 +164,20 @@ export default function App() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [selectedTradeForView, setSelectedTradeForView] =
     useState<Trade | null>(null);
+  const [selectedTradeForChart, setSelectedTradeForChart] =
+    useState<Trade | null>(null);
   const [configTab, setConfigTab] = useState<"manual" | "optimize">("manual");
   const [startYear, setStartYear] = useState(new Date().getFullYear() - 3);
+  const [isSilent, setIsSilent] = useState(false);
+
+  // Audio Alert
+  const playAlert = useCallback(() => {
+    if (isSilent) return;
+    const audio = new Audio("/cash_register.mp3");
+    audio.play().catch((err) => console.error("Audio playback failed:", err));
+  }, [isSilent]);
+
+  const lastAlertedTradeRef = useRef<string | null>(null);
 
   const fetchStrategies = async () => {
     try {
@@ -161,7 +199,6 @@ export default function App() {
 
   const fetchMarketData = async () => {
     try {
-      setRefreshing(true);
       const response = await axios.get<ApiResponse>(
         `${API_BASE_URL}/market-data`,
         {
@@ -174,17 +211,9 @@ export default function App() {
       );
       if (response.data.s === "ok") {
         setCandles([...response.data.data].sort((a, b) => b.time - a.time));
-        setError(null);
-      } else {
-        setError("Market data stream returned empty or invalid status.");
       }
     } catch (err) {
-      setError(
-        "Connection to backend failed. Please check if the server is running.",
-      );
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+      console.error("fetchMarketData failed:", err);
     }
   };
 
@@ -283,7 +312,7 @@ export default function App() {
     let candleIntervalId: any;
     let tickerIntervalId: any;
 
-    if (isLiveMonitoring && view === "live") {
+    if (isLiveMonitoring && view === "trade") {
       // Initial fetch
       fetchMarketData();
       fetchTicker();
@@ -298,7 +327,7 @@ export default function App() {
               `${API_BASE_URL}/backtest`,
               {
                 pair,
-                resolution: interval,
+                resolution: liveInterval,
                 strategyId: selectedStrategyId,
                 capitalPerTrade: initialCapital,
                 isLive: true,
@@ -306,17 +335,28 @@ export default function App() {
             );
             setBacktestResult(response.data);
 
-            // If live trading is enabled, check for new trades to execute
-            if (isLiveTrading && response.data.trades.length > 0) {
+            // Check for new trades to alert/execute
+            if (response.data.trades.length > 0) {
               const latestTrade = response.data.trades[0];
               if (latestTrade.status === "open") {
-                // Execute trade on exchange
-                await axios.post(`${API_BASE_URL}/trade/execute`, {
-                  side: latestTrade.direction === "buy" ? "buy" : "sell",
-                  pair: pair.replace("B-", "").replace("_", ""),
-                  price: latestTrade.entryPrice,
-                  capital: initialCapital,
-                });
+                const tradeId = `${latestTrade.entryTime}-${latestTrade.direction}`;
+                if (lastAlertedTradeRef.current !== tradeId) {
+                  // Play sound if this isn't the very first detection after refresh
+                  if (lastAlertedTradeRef.current !== null) {
+                    playAlert();
+                  }
+                  lastAlertedTradeRef.current = tradeId;
+
+                  // ONLY execute on exchange if Auto-Trade is ON
+                  if (isLiveTrading) {
+                    await axios.post(`${API_BASE_URL}/trade/execute`, {
+                      side: latestTrade.direction === "buy" ? "buy" : "sell",
+                      pair: pair.replace("B-", "").replace("_", ""),
+                      price: latestTrade.entryPrice,
+                      capital: initialCapital,
+                    });
+                  }
+                }
               }
             }
           } catch (err) {
@@ -329,7 +369,7 @@ export default function App() {
       // Poll ticker every 1 second (light call)
       tickerIntervalId = window.setInterval(() => {
         fetchTicker();
-      }, 1000);
+      }, 5000);
     }
 
     return () => {
@@ -345,13 +385,6 @@ export default function App() {
     initialCapital,
     liveInterval,
   ]);
-
-  // Fetch data immediately when liveInterval changes
-  useEffect(() => {
-    if (view === "live") {
-      fetchMarketData();
-    }
-  }, [liveInterval, view, pair]);
 
   const tradesByDay = useMemo(() => {
     if (!backtestResult) return {};
@@ -373,17 +406,6 @@ export default function App() {
     );
   }, [backtestResult]);
 
-  const stats = useMemo(() => {
-    if (candles.length === 0)
-      return { avgPrice: 0, maxHigh: 0, minLow: 0, totalVolume: 0 };
-    const totalVolume = candles.reduce((acc, c) => acc + c.volume, 0);
-    const maxHigh = Math.max(...candles.map((c) => c.high));
-    const minLow = Math.min(...candles.map((c) => c.low));
-    const avgPrice =
-      candles.reduce((acc, c) => acc + c.close, 0) / candles.length;
-    return { avgPrice, maxHigh, minLow, totalVolume };
-  }, [candles]);
-
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-blue-500/30">
       {/* Background decoration */}
@@ -403,7 +425,7 @@ export default function App() {
         <div className="absolute bottom-[-10%] right-[-5%] w-[40%] h-[40%] rounded-full bg-indigo-600/10 blur-[120px]" />
       </div>
 
-      <nav className="relative z-10 border-b border-white/5 backdrop-blur-xl bg-slate-950/70 sticky top-0">
+      <nav className="relative  border-b border-white/5 backdrop-blur-xl bg-slate-950/70 sticky top-0 z-100">
         <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-cyan-400 flex items-center justify-center">
@@ -421,10 +443,10 @@ export default function App() {
 
           <div className="flex items-center gap-2 bg-slate-900/80 p-1.5 rounded-2xl border border-white/5">
             <ViewToggle
-              active={view === "live"}
-              onClick={() => setView("live")}
-              icon={Activity}
-              label="Live Feed"
+              active={view === "trade"}
+              onClick={() => setView("trade")}
+              icon={Zap}
+              label="Live Trade"
             />
             <ViewToggle
               active={view === "backtest"}
@@ -444,214 +466,8 @@ export default function App() {
       </nav>
 
       <main className="relative z-10 max-w-7xl mx-auto px-6 py-12">
-        {view === "live" ? (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-          >
-            <header className="mb-12 flex flex-col md:flex-row md:items-end justify-between gap-8">
-              <div>
-                <div className="flex items-center gap-2 mb-3">
-                  <span className="px-2.5 py-1 rounded-lg bg-blue-500/10 border border-blue-500/20 text-[10px] font-black text-blue-400 uppercase tracking-widest">
-                    Real-time Data
-                  </span>
-                  <div className="h-px w-8 bg-slate-800" />
-                  <span className="text-slate-500 text-[10px] font-bold uppercase tracking-widest leading-none">
-                    Candlestick Feed
-                  </span>
-                </div>
-                <h1 className="text-4xl md:text-5xl font-black tracking-tighter bg-gradient-to-br from-white via-slate-200 to-slate-500 bg-clip-text text-transparent">
-                  Market Pulse
-                </h1>
-              </div>
-
-              <div className="flex items-center gap-6">
-                <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 px-4 py-2.5 rounded-2xl">
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={isLiveMonitoring}
-                      onChange={(e) => setIsLiveMonitoring(e.target.checked)}
-                      className="sr-only peer"
-                    />
-                    <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-200 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
-                    <span className="ml-3 text-[10px] font-black text-emerald-400 uppercase tracking-widest">
-                      Live Monitoring
-                    </span>
-                  </label>
-                </div>
-
-                <div className="flex items-center gap-3 bg-slate-900/40 p-1.5 rounded-2xl border border-white/5">
-                  {[
-                    "B-BTC_USDT",
-                    "B-ETH_USDT",
-                    "B-DOGE_USDT",
-                    "B-SHIB_USDT",
-                  ].map((p) => (
-                    <button
-                      key={p}
-                      onClick={() => setPair(p)}
-                      className={cn(
-                        "px-5 py-2.5 rounded-xl text-xs font-black transition-all",
-                        pair === p
-                          ? "bg-blue-600 text-white shadow-xl shadow-blue-600/20"
-                          : "text-slate-500 hover:text-slate-200 hover:bg-white/5",
-                      )}
-                    >
-                      {p.includes("-")
-                        ? p.split("-")[1].replace("_", "/")
-                        : p.replace("_", "/")}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </header>
-
-            <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
-              <StatCard
-                title="Real-time Avg"
-                value={`$${stats.avgPrice.toLocaleString()}`}
-                icon={Layers}
-                color="text-blue-400"
-                gradient="from-blue-600/10 to-transparent"
-              />
-              <StatCard
-                title="Session High"
-                value={`$${stats.maxHigh.toLocaleString()}`}
-                icon={TrendingUp}
-                color="text-emerald-400"
-                gradient="from-emerald-600/10 to-transparent"
-              />
-              <StatCard
-                title="Session Low"
-                value={`$${stats.minLow.toLocaleString()}`}
-                icon={TrendingDown}
-                color="text-rose-400"
-                gradient="from-rose-600/10 to-transparent"
-              />
-              <StatCard
-                title="Volume Aggregate"
-                value={stats.totalVolume.toFixed(2)}
-                icon={Activity}
-                color="text-amber-400"
-                gradient="from-amber-600/10 to-transparent"
-              />
-            </section>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-              <div className="lg:col-span-2 space-y-4">
-                <div className="flex items-center justify-between px-2 mb-2">
-                  <div className="flex items-center gap-6">
-                    <h2 className="text-xs font-black uppercase tracking-[0.2em] text-slate-500 flex items-center gap-2">
-                      <Activity className="w-4 h-4 text-blue-500" /> Live Market
-                      Chart
-                    </h2>
-                    <div className="flex bg-slate-900/50 p-1 rounded-xl border border-white/5">
-                      {["1", "5", "15", "30", "60", "D"].map((tf) => (
-                        <button
-                          key={tf}
-                          onClick={() => setLiveInterval(tf)}
-                          className={cn(
-                            "px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all",
-                            liveInterval === tf
-                              ? "bg-blue-600 text-white shadow-lg"
-                              : "text-slate-500 hover:text-slate-300",
-                          )}
-                        >
-                          {tf === "D" ? "1D" : tf + "M"}
-                        </button>
-                      ))}
-                    </div>
-                    {tickerPrice && (
-                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
-                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                        <span className="text-[10px] font-black text-emerald-400">
-                          ${tickerPrice.toLocaleString()}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-4 text-[10px] font-bold text-slate-600">
-                    <span>
-                      RES: {liveInterval === "D" ? "1D" : liveInterval + "M"}
-                    </span>
-                    <span className="w-1 h-1 rounded-full bg-slate-800" />
-                    <span>PAIR: {pair}</span>
-                  </div>
-                </div>
-
-                <div className="mb-8">
-                  <LiveMarketChart
-                    candles={candles}
-                    trades={backtestResult?.trades || []}
-                  />
-                </div>
-
-                <div className="flex items-center justify-between px-2 mb-2">
-                  <h2 className="text-xs font-black uppercase tracking-[0.2em] text-slate-500 flex items-center gap-2">
-                    <Database className="w-4 h-4 text-blue-500" /> Recent
-                    Candles
-                  </h2>
-                </div>
-
-                <div className="space-y-3">
-                  <AnimatePresence mode="popLayout">
-                    {loading
-                      ? Array.from({ length: 6 }).map((_, i) => (
-                          <div
-                            key={i}
-                            className="h-24 w-full bg-white/5 animate-pulse rounded-3xl border border-white/5"
-                          />
-                        ))
-                      : candles
-                          .slice(0, 15)
-                          .map((candle, idx) => (
-                            <CandleRow
-                              key={candle.time}
-                              candle={candle}
-                              index={idx}
-                            />
-                          ))}
-                  </AnimatePresence>
-                </div>
-              </div>
-
-              <aside className="space-y-6">
-                <div className="p-8 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-[2.5rem] relative overflow-hidden group shadow-2xl shadow-blue-600/20">
-                  <div className="absolute top-0 right-0 w-32 h-32 bg-white/20 blur-[80px] -translate-y-1/2 translate-x-1/2" />
-                  <div className="relative z-10">
-                    <Shield className="w-10 h-10 text-white/40 mb-6" />
-                    <h3 className="text-2xl font-black text-white mb-3 leading-tight">
-                      Secure Edge
-                      <br />
-                      Technology
-                    </h3>
-                    <p className="text-blue-100/70 text-sm leading-relaxed mb-8">
-                      Proprietary Node.js adapter for high-frequency market data
-                      streaming.
-                    </p>
-                    <button className="w-full py-4 bg-white text-blue-700 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl hover:scale-[1.02] active:scale-[0.98] transition-transform">
-                      System Status
-                    </button>
-                  </div>
-                </div>
-
-                <div className="p-8 bg-slate-900/40 border border-white/5 rounded-[2.5rem] backdrop-blur-sm">
-                  <h4 className="text-xs font-black uppercase tracking-widest text-slate-500 mb-6 flex items-center gap-2">
-                    <Info className="w-4 h-4 text-blue-400" /> Platform Insight
-                  </h4>
-                  <div className="space-y-5">
-                    <InsightRow label="Engine Version" value="v4.2.1-Stable" />
-                    <InsightRow label="Data Source" value="CoinDCX Pro" />
-                    <InsightRow label="API Latency" value="112ms" />
-                    <InsightRow label="Encryption" value="AES-256" />
-                  </div>
-                </div>
-              </aside>
-            </div>
-          </motion.div>
-        ) : (
+        {/* Main Views */}
+        {view === "backtest" && (
           <motion.div
             initial={{ opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -1437,6 +1253,409 @@ export default function App() {
             </div>
           </motion.div>
         )}
+        {view === "trade" && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="space-y-10"
+          >
+            {/* Terminal Header */}
+            <div className="flex flex-col md:flex-row md:items-end justify-between gap-8">
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-[10px] font-black text-emerald-400 uppercase tracking-widest">
+                    Execution Terminal
+                  </span>
+                  <div className="h-px w-8 bg-slate-800" />
+                  <span className="text-slate-500 text-[10px] font-bold uppercase tracking-widest leading-none">
+                    Live Strategy Engine
+                  </span>
+                </div>
+                <h1 className="text-4xl md:text-5xl font-black tracking-tighter bg-gradient-to-br from-white via-slate-200 to-emerald-500 bg-clip-text text-transparent">
+                  Live Trade Console
+                </h1>
+              </div>
+
+              <div className="flex items-center gap-8">
+                <div className="flex items-center gap-3 bg-slate-900/40 p-1.5 rounded-2xl border border-white/5">
+                  {[
+                    "B-BTC_USDT",
+                    "B-ETH_USDT",
+                    "B-DOGE_USDT",
+                    "B-SHIB_USDT",
+                  ].map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPair(p)}
+                      className={cn(
+                        "px-4 py-2 rounded-xl text-[10px] font-black transition-all",
+                        pair === p
+                          ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
+                          : "text-slate-500 hover:text-slate-200 hover:bg-white/5",
+                      )}
+                    >
+                      {p.split("-")[1].replace("_", "/")}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-6">
+                {tickerPrice && (
+                  <div className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
+                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-xs font-black text-emerald-400 font-mono">
+                      ${tickerPrice.toLocaleString()}
+                    </span>
+                  </div>
+                )}
+                <button
+                  onClick={() => setIsSilent(!isSilent)}
+                  className={cn(
+                    "p-3 rounded-2xl border transition-all active:scale-95",
+                    isSilent
+                      ? "bg-rose-500/10 border-rose-500/20 text-rose-400"
+                      : "bg-blue-500/10 border-blue-500/20 text-blue-400",
+                  )}
+                >
+                  {isSilent ? (
+                    <VolumeX className="w-5 h-5" />
+                  ) : (
+                    <Volume2 className="w-5 h-5" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Main Terminal Body */}
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+              {/* Left Sidebar: Controls & Status */}
+              <aside className="lg:col-span-1 space-y-6">
+                {/* Strategy Control */}
+                <div className="p-8 bg-slate-900/60 border border-white/10 rounded-[2.5rem] shadow-2xl space-y-8">
+                  <section>
+                    <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-6 flex items-center gap-2">
+                      <Settings2 className="w-4 h-4 text-emerald-500" />{" "}
+                      Strategy Configuration
+                    </h3>
+                    <div className="space-y-6">
+                      <div className="flex items-center justify-between p-4 bg-slate-950/50 rounded-2xl border border-white/5">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">
+                          Live Monitor
+                        </span>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={isLiveMonitoring}
+                            onChange={(e) =>
+                              setIsLiveMonitoring(e.target.checked)
+                            }
+                            className="sr-only peer"
+                          />
+                          <div className="w-10 h-5 bg-slate-800 rounded-full peer peer-checked:bg-blue-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-5"></div>
+                        </label>
+                      </div>
+                      <div className="flex items-center justify-between p-4 bg-slate-950/50 rounded-2xl border border-white/5">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">
+                          Auto-Trade
+                        </span>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={isLiveTrading}
+                            onChange={(e) => setIsLiveTrading(e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-10 h-5 bg-slate-800 rounded-full peer peer-checked:bg-emerald-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-5"></div>
+                        </label>
+                      </div>
+
+                      <InputGroup label="Select Strategy" sub="Active logic">
+                        <select
+                          value={selectedStrategyId}
+                          onChange={(e) =>
+                            setSelectedStrategyId(e.target.value)
+                          }
+                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
+                        >
+                          {strategies.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                      </InputGroup>
+
+                      <InputGroup label="Time Interval" sub="Candle timeframe">
+                        <div className="grid grid-cols-3 gap-2">
+                          {["1", "5", "15", "30", "60", "D"].map((tf) => (
+                            <button
+                              key={tf}
+                              onClick={() => setLiveInterval(tf)}
+                              className={cn(
+                                "py-3 rounded-xl text-[10px] font-black uppercase transition-all border",
+                                liveInterval === tf
+                                  ? "bg-emerald-500/10 border-emerald-500/50 text-emerald-400"
+                                  : "bg-slate-950 border-white/5 text-slate-500 hover:text-slate-300",
+                              )}
+                            >
+                              {tf === "D" ? "1D" : tf + "M"}
+                            </button>
+                          ))}
+                        </div>
+                      </InputGroup>
+
+                      <InputGroup
+                        label="Per Trade Capital ($)"
+                        sub="Position size"
+                      >
+                        <input
+                          type="number"
+                          value={initialCapital}
+                          onChange={(e) =>
+                            setInitialCapital(Number(e.target.value))
+                          }
+                          className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
+                        />
+                      </InputGroup>
+                    </div>
+                  </section>
+                </div>
+
+                <div className="p-8 bg-slate-900/60 border border-white/10 rounded-[2.5rem] shadow-2xl">
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                      <Database className="w-4 h-4 text-blue-500" /> Activity
+                      Log
+                    </h3>
+                    {backtestResult && (
+                      <div className="flex items-center gap-4">
+                        <div className="text-right">
+                          <p className="text-[8px] font-black text-slate-500 uppercase">
+                            Win/Loss
+                          </p>
+                          <p className="text-[10px] font-bold text-white">
+                            <span className="text-emerald-400">
+                              {
+                                backtestResult.trades.filter(
+                                  (t) => t.profit > 0,
+                                ).length
+                              }
+                            </span>
+                            <span className="text-slate-600 mx-1">/</span>
+                            <span className="text-rose-400">
+                              {
+                                backtestResult.trades.filter(
+                                  (t) => t.profit < 0,
+                                ).length
+                              }
+                            </span>
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-[8px] font-black text-slate-500 uppercase">
+                            Total P/L
+                          </p>
+                          <p
+                            className={cn(
+                              "text-[10px] font-bold",
+                              backtestResult.summary.totalProfit >= 0
+                                ? "text-emerald-400"
+                                : "text-rose-400",
+                            )}
+                          >
+                            ${backtestResult.summary.totalProfit.toFixed(1)}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2 no-scrollbar">
+                    {[...(backtestResult?.trades || [])]
+                      .sort(
+                        (a, b) =>
+                          dayjs(b.entryTime).valueOf() -
+                          dayjs(a.entryTime).valueOf(),
+                      )
+                      .slice(0, 15)
+                      .map((trade, i) => (
+                        <div
+                          key={i}
+                          onClick={() => setSelectedTradeForChart(trade)}
+                          className={cn(
+                            "flex items-center justify-between text-[10px] font-mono py-2 border-b border-white/5 last:border-0 cursor-pointer hover:bg-white/5 px-2 rounded-lg transition-colors",
+                            selectedTradeForChart === trade &&
+                              "bg-blue-500/10 border-blue-500/20",
+                          )}
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-slate-500 text-[8px]">
+                              {dayjs(trade.entryTime).format("HH:mm:ss")}
+                            </span>
+                            <span
+                              className={cn(
+                                "font-black",
+                                trade.direction === "buy"
+                                  ? "text-emerald-500"
+                                  : "text-rose-500",
+                              )}
+                            >
+                              {trade.direction.toUpperCase()}
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-slate-300 block">
+                              ${trade.entryPrice.toFixed(0)}
+                            </span>
+                            <span
+                              className={cn(
+                                "font-black",
+                                trade.profit >= 0
+                                  ? "text-emerald-400"
+                                  : "text-rose-400",
+                              )}
+                            >
+                              {trade.profit >= 0 ? "+" : ""}
+                              {trade.profit.toFixed(1)}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              </aside>
+
+              {/* Center: Main Chart & Active Trade */}
+              <div className="lg:col-span-3 space-y-8">
+                <div className="bg-slate-900/60 border border-white/10 rounded-[2.5rem] shadow-2xl overflow-hidden p-8">
+                  <div className="flex items-center justify-between mb-6">
+                    <h2 className="text-xs font-black uppercase tracking-[0.2em] text-slate-500 flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-emerald-500" /> Live
+                      Market Chart
+                    </h2>
+                    <div className="px-4 py-1.5 rounded-xl bg-slate-950/50 border border-white/5 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                      {pair} •{" "}
+                      {liveInterval === "D" ? "1D" : liveInterval + "M"}
+                    </div>
+                  </div>
+                  <div className="h-[500px] w-full bg-slate-950/50 rounded-3xl border border-white/5 overflow-hidden">
+                    <LiveMarketChart
+                      candles={candles}
+                      trades={backtestResult?.trades || []}
+                      selectedTrade={selectedTradeForChart}
+                    />
+                  </div>
+                </div>
+
+                {/* Active Trade Card */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                  {!backtestResult ||
+                  backtestResult.trades.filter((t) => t.status === "open")
+                    .length === 0 ? (
+                    <div className="md:col-span-2 p-12 border-2 border-dashed border-white/5 rounded-[2.5rem] flex flex-col items-center justify-center text-slate-600">
+                      <div className="w-16 h-16 rounded-full bg-slate-900 flex items-center justify-center mb-4">
+                        <Zap className="w-8 h-8 opacity-20" />
+                      </div>
+                      <p className="text-sm font-black uppercase tracking-widest">
+                        No Active Positions
+                      </p>
+                    </div>
+                  ) : (
+                    backtestResult.trades
+                      .filter((t) => t.status === "open")
+                      .slice(0, 1)
+                      .map((trade, i) => (
+                        <motion.div
+                          key={i}
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className="p-8 border rounded-[2.5rem] shadow-2xl relative overflow-hidden group bg-gradient-to-br from-emerald-500/10 to-blue-500/10 border-emerald-500/20"
+                        >
+                          <div className="absolute top-0 right-0 p-8 opacity-[0.03] group-hover:opacity-[0.08] transition-opacity">
+                            <Activity className="w-32 h-32 text-emerald-400" />
+                          </div>
+                          <div className="relative z-10 space-y-6">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-4">
+                                <div
+                                  className={cn(
+                                    "w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg",
+                                    trade.direction === "buy"
+                                      ? "bg-emerald-500 text-slate-950"
+                                      : "bg-rose-500 text-white",
+                                  )}
+                                >
+                                  {trade.direction === "buy" ? (
+                                    <TrendingUp className="w-6 h-6" />
+                                  ) : (
+                                    <TrendingDown className="w-6 h-6" />
+                                  )}
+                                </div>
+                                <div>
+                                  <h4 className="text-lg font-black text-white uppercase tracking-tighter">
+                                    {trade.direction} Position
+                                  </h4>
+                                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                                    {pair} • IN PROGRESS
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <p
+                                  className={cn(
+                                    "text-3xl font-black tracking-tighter",
+                                    trade.profit >= 0
+                                      ? "text-emerald-400"
+                                      : "text-rose-400",
+                                  )}
+                                >
+                                  {trade.profit >= 0 ? "+" : ""}$
+                                  {trade.profit.toFixed(2)}
+                                </p>
+                                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                                  Live P/L
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="h-px w-full bg-white/5" />
+
+                            <div className="grid grid-cols-3 gap-6">
+                              <div>
+                                <p className="text-[9px] font-black text-slate-500 uppercase mb-1">
+                                  Entry Price
+                                </p>
+                                <p className="text-sm font-bold text-white font-mono">
+                                  ${trade.entryPrice.toLocaleString()}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-[9px] font-black text-slate-500 uppercase mb-1">
+                                  Stop Loss
+                                </p>
+                                <p className="text-sm font-bold text-rose-400 font-mono">
+                                  ${trade.sl.toLocaleString()}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-[9px] font-black text-slate-500 uppercase mb-1">
+                                  Target
+                                </p>
+                                <p className="text-sm font-bold text-emerald-400 font-mono">
+                                  ${trade.tp?.toLocaleString() || "N/A"}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        </motion.div>
+                      ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
       </main>
 
       <footer className="mt-20 border-t border-white/5 py-12 relative z-10">
@@ -1465,13 +1684,22 @@ export default function App() {
 function LiveMarketChart({
   candles,
   trades,
+  selectedTrade,
 }: {
   candles: Candle[];
   trades: Trade[];
+  selectedTrade?: Trade | null;
 }) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<any>(null);
   const candleSeriesRef = useRef<any>(null);
+  const ema20SeriesRef = useRef<any>(null);
+  const ema50SeriesRef = useRef<any>(null);
+  const highSeriesRef = useRef<any>(null);
+  const lowSeriesRef = useRef<any>(null);
+  const slLineRef = useRef<any>(null);
+  const tpLineRef = useRef<any>(null);
+  const tradeHighlightSeriesRef = useRef<any>(null);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -1502,8 +1730,47 @@ function LiveMarketChart({
       wickDownColor: "#ef4444",
     });
 
+    const tradeHighlightSeries = chart.addSeries(AreaSeries, {
+      topColor: "rgba(16, 185, 129, 0.4)",
+      bottomColor: "rgba(16, 185, 129, 0.1)",
+      lineColor: "rgba(16, 185, 129, 0.8)",
+      lineWidth: 2,
+      priceLineVisible: false,
+    });
+
+    const ema20Series = chart.addSeries(LineSeries, {
+      color: "#3b82f6",
+      lineWidth: 1,
+      title: "EMA 20",
+    });
+
+    const ema50Series = chart.addSeries(LineSeries, {
+      color: "#f59e0b",
+      lineWidth: 1,
+      title: "EMA 50",
+    });
+
+    const highSeries = chart.addSeries(LineSeries, {
+      color: "rgba(16, 185, 129, 0.3)",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      title: "High",
+    });
+
+    const lowSeries = chart.addSeries(LineSeries, {
+      color: "rgba(239, 68, 68, 0.3)",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      title: "Low",
+    });
+
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
+    tradeHighlightSeriesRef.current = tradeHighlightSeries;
+    ema20SeriesRef.current = ema20Series;
+    ema50SeriesRef.current = ema50Series;
+    highSeriesRef.current = highSeries;
+    lowSeriesRef.current = lowSeries;
 
     const handleResize = () => {
       if (chartContainerRef.current) {
@@ -1533,15 +1800,44 @@ function LiveMarketChart({
         close: c.close,
       }));
 
-    // Use update for the latest candle if it's the same time period
-    // This makes the chart move like a real trading app
     if (sortedData.length > 0) {
       candleSeriesRef.current.setData(sortedData);
+
+      // Calculate EMA 20
+      const ema20 = calculateEMA(
+        sortedData.map((d) => d.close),
+        20,
+      );
+      ema20SeriesRef.current.setData(
+        sortedData.map((d, i) => ({ time: d.time, value: ema20[i] })),
+      );
+
+      // Calculate EMA 50
+      const ema50 = calculateEMA(
+        sortedData.map((d) => d.close),
+        50,
+      );
+      ema50SeriesRef.current.setData(
+        sortedData.map((d, i) => ({ time: d.time, value: ema50[i] })),
+      );
+
+      // Calculate 20-period High/Low
+      const hl = calculateHighLow(sortedData, 20);
+      highSeriesRef.current.setData(
+        sortedData.map((d, i) => ({ time: d.time, value: hl.highs[i] })),
+      );
+      lowSeriesRef.current.setData(
+        sortedData.map((d, i) => ({ time: d.time, value: hl.lows[i] })),
+      );
     }
 
     // Add markers for trades
     const markers: any[] = [];
-    trades.forEach((trade) => {
+
+    // If a trade is selected from the log, prioritize its markers
+    const tradesToMark = selectedTrade ? [selectedTrade] : trades;
+
+    tradesToMark.forEach((trade) => {
       const entryTime =
         Math.floor(dayjs(trade.entryTime).valueOf() / 1000) + istOffset;
       markers.push({
@@ -1549,8 +1845,20 @@ function LiveMarketChart({
         position: trade.direction === "buy" ? "belowBar" : "aboveBar",
         color: trade.direction === "buy" ? "#10b981" : "#ef4444",
         shape: trade.direction === "buy" ? "arrowUp" : "arrowDown",
-        text: `${trade.direction.toUpperCase()} @ ${trade.entryPrice.toFixed(2)}`,
+        text: `ENTRY ${trade.direction.toUpperCase()} @ ${trade.entryPrice.toFixed(2)}`,
+        size: 2,
       });
+
+      if (trade.status === "open") {
+        // Highlight active trade with a special marker
+        markers.push({
+          time: entryTime,
+          position: trade.direction === "buy" ? "belowBar" : "aboveBar",
+          color: "#3b82f6",
+          shape: "circle",
+          text: "ACTIVE",
+        });
+      }
 
       if (trade.exitTime) {
         const exitTime =
@@ -1560,7 +1868,8 @@ function LiveMarketChart({
           position: trade.direction === "buy" ? "aboveBar" : "belowBar",
           color: "#94a3b8",
           shape: trade.direction === "buy" ? "arrowDown" : "arrowUp",
-          text: `EXIT @ ${trade.exitPrice?.toFixed(2)}`,
+          text: `EXIT ${trade.exitReason || ""} @ ${trade.exitPrice?.toFixed(2)}`,
+          size: 2,
         });
       }
     });
@@ -1570,14 +1879,111 @@ function LiveMarketChart({
       typeof candleSeriesRef.current.setMarkers === "function"
     ) {
       candleSeriesRef.current.setMarkers(markers);
+
+      // Scroll to selected trade if exists
+      if (selectedTrade && chartRef.current) {
+        chartRef.current.timeScale().scrollToPosition(0, false); // First reset
+        // We don't have a direct "scrollToTime" in basic lightweight-charts without more complex logic,
+        // but setMarkers already highlights it. For now, we'll ensure it's in view if possible.
+      }
     }
-  }, [candles, trades]);
+
+    // Add SL/TP Lines for the latest active trade
+    const activeTrade = trades.find((t) => t.status === "open");
+    if (candleSeriesRef.current) {
+      // Clear existing lines
+      if (slLineRef.current) {
+        candleSeriesRef.current.removePriceLine(slLineRef.current);
+        slLineRef.current = null;
+      }
+      if (tpLineRef.current) {
+        candleSeriesRef.current.removePriceLine(tpLineRef.current);
+        tpLineRef.current = null;
+      }
+
+      if (activeTrade) {
+        slLineRef.current = candleSeriesRef.current.createPriceLine({
+          price: activeTrade.sl,
+          color: "#ef4444",
+          lineWidth: 2,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `SL: ${activeTrade.sl.toFixed(2)}`,
+        });
+
+        if (activeTrade.tp) {
+          tpLineRef.current = candleSeriesRef.current.createPriceLine({
+            price: activeTrade.tp,
+            color: "#10b981",
+            lineWidth: 2,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: `TP: ${activeTrade.tp.toFixed(2)}`,
+          });
+        }
+      }
+    }
+
+    // Add Highlight Area for selected trade
+    if (selectedTrade && tradeHighlightSeriesRef.current) {
+      const entryTime =
+        Math.floor(dayjs(selectedTrade.entryTime).valueOf() / 1000) + istOffset;
+      const exitTime = selectedTrade.exitTime
+        ? Math.floor(dayjs(selectedTrade.exitTime).valueOf() / 1000) + istOffset
+        : Math.floor(dayjs().valueOf() / 1000) + istOffset;
+
+      const isProfit = selectedTrade.profit >= 0;
+      tradeHighlightSeriesRef.current.applyOptions({
+        topColor: isProfit
+          ? "rgba(16, 185, 129, 0.4)"
+          : "rgba(239, 68, 68, 0.4)",
+        bottomColor: isProfit
+          ? "rgba(16, 185, 129, 0.1)"
+          : "rgba(239, 68, 68, 0.1)",
+        lineColor: isProfit
+          ? "rgba(16, 185, 129, 0.8)"
+          : "rgba(239, 68, 68, 0.8)",
+        lineWidth: 2,
+      });
+
+      const highlightData = sortedData
+        .filter((d) => d.time >= entryTime && d.time <= exitTime)
+        .map((d) => ({ time: d.time, value: d.close }));
+
+      tradeHighlightSeriesRef.current.setData(highlightData);
+    } else if (tradeHighlightSeriesRef.current) {
+      tradeHighlightSeriesRef.current.setData([]);
+    }
+  }, [candles, trades, selectedTrade]);
 
   return (
     <div className="p-6 bg-slate-900/40 border border-white/5 rounded-[2.5rem] backdrop-blur-sm overflow-hidden">
       <div ref={chartContainerRef} className="w-full" />
     </div>
   );
+}
+
+function calculateEMA(data: number[], period: number) {
+  const k = 2 / (period + 1);
+  let ema = data[0];
+  const results = [ema];
+  for (let i = 1; i < data.length; i++) {
+    ema = data[i] * k + ema * (1 - k);
+    results.push(ema);
+  }
+  return results;
+}
+
+function calculateHighLow(data: any[], period: number) {
+  const highs = [];
+  const lows = [];
+  for (let i = 0; i < data.length; i++) {
+    const start = Math.max(0, i - period + 1);
+    const window = data.slice(start, i + 1);
+    highs.push(Math.max(...window.map((d) => d.high)));
+    lows.push(Math.min(...window.map((d) => d.low)));
+  }
+  return { highs, lows };
 }
 
 function TradeViewModal({
@@ -1872,128 +2278,6 @@ function ModalStat({
   );
 }
 
-function CandleRow({ candle, index }: { candle: Candle; index: number }) {
-  const isGreen = candle.close >= candle.open;
-  return (
-    <motion.div
-      initial={{ opacity: 0, x: -10 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay: Math.min(index * 0.05, 0.4) }}
-      className="p-6 bg-slate-900/40 border border-white/5 rounded-[2rem] hover:bg-white/[0.03] transition-all group overflow-hidden relative"
-    >
-      <div className="absolute top-0 right-0 p-4 opacity-[0.03] group-hover:opacity-[0.1] transition-opacity">
-        <Zap
-          className={cn(
-            "w-16 h-16",
-            isGreen ? "text-emerald-400" : "text-rose-400",
-          )}
-        />
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-6 relative z-10">
-        <div className="flex items-center gap-5">
-          <div
-            className={cn(
-              "w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 border rotate-3 group-hover:rotate-0 transition-transform shadow-lg",
-              isGreen
-                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
-                : "bg-rose-500/10 border-rose-500/20 text-rose-400",
-            )}
-          >
-            {isGreen ? (
-              <TrendingUp className="w-6 h-6" />
-            ) : (
-              <TrendingDown className="w-6 h-6" />
-            )}
-          </div>
-          <div>
-            <div className="flex items-center gap-3 mb-1">
-              <h3 className="font-black text-xl leading-none">
-                ${candle.close.toLocaleString()}
-              </h3>
-              <span
-                className={cn(
-                  "px-2 py-0.5 rounded-lg text-[10px] font-black tracking-tighter uppercase",
-                  isGreen
-                    ? "bg-emerald-500/10 text-emerald-400"
-                    : "bg-rose-500/10 text-rose-400",
-                )}
-              >
-                {(
-                  (Math.abs(candle.close - candle.open) / candle.open) *
-                  100
-                ).toFixed(2)}
-                %
-              </span>
-            </div>
-            <div className="flex items-center gap-4 text-slate-500 text-[10px] font-black uppercase tracking-widest">
-              <span className="flex items-center gap-1.5">
-                <Clock className="w-3 h-3" />{" "}
-                {new Date(candle.time).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </span>
-              <span className="text-slate-800">|</span>
-              <span>VOL {candle.volume.toFixed(1)}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-8 px-6 md:border-l border-white/5">
-          <OHItem label="O" val={candle.open} />
-          <OHItem label="H" val={candle.high} />
-          <OHItem label="L" val={candle.low} />
-          <OHItem label="C" val={candle.close} />
-        </div>
-      </div>
-    </motion.div>
-  );
-}
-
-function StatCard({
-  title,
-  value,
-  icon: Icon,
-  color,
-  gradient,
-}: {
-  title: string;
-  value: string;
-  icon: any;
-  color: string;
-  gradient: string;
-}) {
-  return (
-    <div className="p-8 bg-slate-900/50 border border-white/5 rounded-[2.5rem] relative overflow-hidden group shadow-sm hover:border-white/10 transition-all">
-      <div
-        className={cn(
-          "absolute inset-0 bg-gradient-to-br opacity-50 group-hover:opacity-100 transition-opacity pointer-events-none",
-          gradient,
-        )}
-      />
-      <div className="relative z-10 flex flex-col gap-5">
-        <div
-          className={cn(
-            "p-3 rounded-2xl bg-slate-950/80 w-fit shrink-0 border border-white/5 shadow-inner",
-            color,
-          )}
-        >
-          <Icon className="w-6 h-6" />
-        </div>
-        <div>
-          <p className="text-[10px] text-slate-500 font-black uppercase tracking-[0.2em] mb-2">
-            {title}
-          </p>
-          <p className="text-3xl font-black text-white tracking-tighter group-hover:scale-[1.02] origin-left transition-transform">
-            {value}
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function ResultCard({
   title,
   value,
@@ -2072,30 +2356,6 @@ function InputGroup({
         </span>
       </div>
       {children}
-    </div>
-  );
-}
-
-function OHItem({ label, val }: { label: string; val: number }) {
-  return (
-    <div className="flex flex-col">
-      <span className="text-[10px] font-black text-slate-700 uppercase mb-0.5">
-        {label}
-      </span>
-      <span className="text-xs font-mono font-bold text-slate-300">
-        ${val.toLocaleString()}
-      </span>
-    </div>
-  );
-}
-
-function InsightRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between py-1 border-b border-white/[0.02] last:border-0">
-      <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">
-        {label}
-      </span>
-      <span className="text-xs font-black text-slate-300">{value}</span>
     </div>
   );
 }
