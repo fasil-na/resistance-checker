@@ -9,6 +9,7 @@ import crypto from 'crypto';
 
 import dummyData from './data/dummy_15m.json' with { type: 'json' };
 import { strategies } from './strategies/index.js';
+// import { strategyBuilder } from './strategies/strategyBuilder.js';
 import type { Candle, Trade } from './types/index.js';
 
 dayjs.extend(utc);
@@ -292,7 +293,8 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
             count: allTrades.length,
             successCount: allTrades.filter(t => t.profit > 0).length,
             failedCount: allTrades.filter(t => t.profit <= 0).length,
-            winRate: allTrades.length > 0 ? (allTrades.filter(t => t.profit > 0).length / allTrades.length) * 100 : 0
+            winRate: allTrades.length > 0 ? (allTrades.filter(t => t.profit > 0).length / allTrades.length) * 100 : 0,
+            initialCapital: req.body.capital || req.body.capitalPerTrade || 1000
         };
 
         res.json({ trades: allTrades, summary });
@@ -306,13 +308,11 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
 
 app.post('/api/backtest/optimize', async (req: Request, res: Response) => {
     try {
-        const {
-            pair = "B-BTC_USDT",
-            startYear = dayjs().year() - 3,
-            resolutions = ["5", "15", "30"],
-            atrMultipliers = [1, 2, 3, 4, 5],
-            feeRate = 0.0002
-        } = req.body;
+        const pair: string = req.body.pair || "B-BTC_USDT";
+        const startYear: number = req.body.startYear || dayjs().year() - 3;
+        const resolutions: string[] = req.body.resolutions || ["5", "15", "30"];
+        const atrMultipliers: number[] = req.body.atrMultipliers || [1, 2, 3, 4, 5];
+        const feeRate: number = req.body.feeRate || 0.0002;
 
         const capitalPerTrade = 1;
         const now = dayjs();
@@ -379,15 +379,18 @@ app.post('/api/backtest/optimize', async (req: Request, res: Response) => {
                         const monthProfit = trades.reduce((a, t) => a + t.profit, 0);
                         const monthWins = trades.filter(t => t.profit > 0).length;
 
-                        configResults[resolution][atrMultiplierSL].totalProfit += monthProfit;
-                        configResults[resolution][atrMultiplierSL].totalTrades += trades.length;
-                        configResults[resolution][atrMultiplierSL].wins += monthWins;
-                        configResults[resolution][atrMultiplierSL].monthlyProfits.push({
-                            year: m.year,
-                            month: m.month,
-                            profit: monthProfit,
-                            trades: trades.length
-                        });
+                        const target = configResults[resolution]?.[atrMultiplierSL];
+                        if (target) {
+                            target.totalProfit += monthProfit;
+                            target.totalTrades += trades.length;
+                            target.wins += monthWins;
+                            target.monthlyProfits.push({
+                                year: m.year,
+                                month: m.month,
+                                profit: monthProfit,
+                                trades: trades.length
+                            });
+                        }
                     }
                 } catch (apiErr) {
                     console.error(`Error fetching data for ${m.year}-${m.month} res ${resolution}:`, apiErr);
@@ -399,7 +402,8 @@ app.post('/api/backtest/optimize', async (req: Request, res: Response) => {
         const finalResults: any[] = [];
         for (const resolution of resolutions) {
             for (const atr of atrMultipliers) {
-                const res = configResults[resolution][atr];
+                const res = configResults[resolution]?.[atr];
+                if (!res) continue;
                 finalResults.push({
                     resolution,
                     atrMultiplierSL: atr,
@@ -436,7 +440,84 @@ app.post('/api/backtest/optimize', async (req: Request, res: Response) => {
 
 
 
+// ── Strategy Builder ──────────────────────────────────────────────────────────
+// Tests every possible filter combination on a month of data and returns ranked
+// results so the user can discover the best-performing configurations.
+app.post('/api/strategy-builder', async (req: Request, res: Response) => {
+    try {
+        const {
+            pair = 'B-BTC_USDT',
+            month = new Date().getMonth(),
+            year = new Date().getFullYear(),
+            resolution = '15',
+            perTradeAmount = 100,
+            feeRate = 0.0002,
+            useTrailingSL = true,
+        } = req.body;
 
+        // Build the unix range for the requested month
+        const monthStart = dayjs().year(Number(year)).month(Number(month)).startOf('month');
+        const monthEnd = dayjs().year(Number(year)).month(Number(month)).endOf('month');
+
+        // Fetch 1 extra day before for indicator warm-up
+        const dataFetchStart = Math.floor(monthStart.subtract(1, 'day').valueOf() / 1000);
+        const dataFetchEnd = Math.floor(monthEnd.valueOf() / 1000);
+        console.log(pair, 'pair-------')
+        const response = await axios.get(COINDCX_URL, {
+            params: { pair, from: dataFetchStart, to: dataFetchEnd, resolution: String(resolution), pcode: 'f' }
+        });
+
+        if (response.data.s !== 'ok' || !Array.isArray(response.data.data) || response.data.data.length < 60) {
+            return res.status(422).json({ error: 'Not enough market data for the selected period' });
+        }
+
+        // Sort candles ascending and reshape into parallel arrays
+        const candles: Candle[] = [...response.data.data].sort((a: Candle, b: Candle) => a.time - b.time);
+
+        const marketData = {
+            close: candles.map(c => c.close),
+            high: candles.map(c => c.high),
+            low: candles.map(c => c.low),
+            volume: candles.map(c => c.volume),
+            time: candles.map(c => c.time),
+        };
+
+        // const { results, totalCombinations } = strategyBuilder({
+        //     marketData,
+        //     perTradeAmount: Number(perTradeAmount),
+        //     feeRate: Number(feeRate),
+        //     useTrailingSL: Boolean(useTrailingSL),
+        // });
+
+        // Return only top 200 results to keep response lean
+        // const slim = results.slice(0, 200).map((r: any) => ({
+        //     config: r.config,
+        //     totalTrades: r.totalTrades,
+        //     wins: r.wins,
+        //     losses: r.losses,
+        //     winRate: r.winRate,
+        //     totalPL: r.totalPL,
+        //     avgWin: r.avgWin,
+        //     avgLoss: r.avgLoss,
+        //     riskReward: r.riskReward,
+        // }));
+
+        // res.json({
+        //     results: slim,
+        //     totalCombinations,
+        //     testedCombinations: results.length,
+        //     pair,
+        //     month,
+        //     year,
+        //     resolution,
+        //     perTradeAmount,
+        // });
+
+    } catch (err: any) {
+        console.error('Strategy builder error:', err.message);
+        res.status(500).json({ error: 'Strategy builder failed: ' + err.message });
+    }
+});
 
 
 app.listen(PORT, () => {

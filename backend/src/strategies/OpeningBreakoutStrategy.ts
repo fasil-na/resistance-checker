@@ -3,6 +3,7 @@ import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import type { Candle, Trade } from '../types/index.js';
 import type { Strategy } from './index.js';
+import { calculateUnits, calculateTradeProfit } from './StrategyUtils.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -16,7 +17,9 @@ export class OpeningBreakoutStrategy implements Strategy {
         if (candles.length < 50) return [];
 
         const {
-            capitalPerTrade = 1,
+            capital = 1000,
+            riskPerTrade = 1, // 1%
+            maxPositionSize = 100, // 100%
             atrMultiplierSL = 0.4,
             feeRate = 0.0002,
             simulationStartUnix = 0
@@ -57,12 +60,15 @@ export class OpeningBreakoutStrategy implements Strategy {
             if (Math.abs(c.close - ema20) < 10) continue;
 
             if (currentTrade) {
+                const { trailingSL = true } = params;
                 if (currentTrade.direction === 'buy') {
-                    const lastHigh = currentTrade.lastHigh ?? currentTrade.entryPrice;
-                    if (c.high > lastHigh) {
-                        const move = c.high - lastHigh;
-                        currentTrade.sl! += move;
-                        currentTrade.lastHigh = c.high;
+                    if (trailingSL) {
+                        const lastHigh = currentTrade.lastHigh ?? currentTrade.entryPrice;
+                        if (c.high > lastHigh) {
+                            const move = c.high - lastHigh;
+                            currentTrade.sl! += move;
+                            currentTrade.lastHigh = c.high;
+                        }
                     }
                     if (c.close <= currentTrade.sl!) {
                         currentTrade.exitPrice = currentTrade.sl!;
@@ -70,11 +76,13 @@ export class OpeningBreakoutStrategy implements Strategy {
                         currentTrade.status = 'closed';
                     }
                 } else {
-                    const lastLow = currentTrade.lastLow ?? currentTrade.entryPrice;
-                    if (c.low < lastLow) {
-                        const move = lastLow - c.low;
-                        currentTrade.sl! -= move;
-                        currentTrade.lastLow = c.low;
+                    if (trailingSL) {
+                        const lastLow = currentTrade.lastLow ?? currentTrade.entryPrice;
+                        if (c.low < lastLow) {
+                            const move = lastLow - c.low;
+                            currentTrade.sl! -= move;
+                            currentTrade.lastLow = c.low;
+                        }
                     }
                     if (c.close >= currentTrade.sl!) {
                         currentTrade.exitPrice = currentTrade.sl!;
@@ -85,17 +93,9 @@ export class OpeningBreakoutStrategy implements Strategy {
 
                 if (currentTrade.status === 'closed') {
                     currentTrade.exitTime = time.toISOString();
-                    const units = currentTrade.units || 0;
-                    const grossProfit = currentTrade.direction === 'buy'
-                        ? (currentTrade.exitPrice! - currentTrade.entryPrice) * units
-                        : (currentTrade.entryPrice - currentTrade.exitPrice!) * units;
-
-                    const entryVal = currentTrade.entryPrice * units;
-                    const exitVal = (currentTrade.exitPrice || 0) * units;
-                    const fee = (entryVal + exitVal) * feeRate;
-
+                    const { profit, fee } = calculateTradeProfit(currentTrade, currentTrade.exitPrice!, feeRate);
                     currentTrade.fee = fee;
-                    currentTrade.profit = grossProfit - fee;
+                    currentTrade.profit = profit;
                     allTrades.push(currentTrade);
                     currentTrade = null;
                 }
@@ -116,8 +116,13 @@ export class OpeningBreakoutStrategy implements Strategy {
                 const entry = c.close;
                 const atr = this.calculateATR(candles, 14, i);
                 const sl = direction === 'buy' ? entry - atr * atrMultiplierSL : entry + atr * atrMultiplierSL;
-                const riskPerUnit = Math.abs(entry - sl);
-                const units = riskPerUnit > 0 ? capitalPerTrade / riskPerUnit : 0;
+
+                const units = calculateUnits(entry, sl, {
+                    capital,
+                    riskPerTrade,
+                    maxPositionSize,
+                    feeRate
+                });
 
                 currentTrade = {
                     rangeHigh,

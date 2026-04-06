@@ -8,9 +8,7 @@ export interface Strategy {
 }
 
 import { OpeningBreakoutStrategy } from './OpeningBreakoutStrategy.js';
-import { MACrossoverStrategy } from './MACrossoverStrategy.js';
 
 export const strategies: Record<string, Strategy> = {
     'opening-breakout': new OpeningBreakoutStrategy(),
-    'ma-crossover': new MACrossoverStrategy(),
 };
