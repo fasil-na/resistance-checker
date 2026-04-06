@@ -11,6 +11,7 @@ import dummyData from './data/dummy_15m.json' with { type: 'json' };
 import { strategies } from './strategies/index.js';
 // import { strategyBuilder } from './strategies/strategyBuilder.js';
 import type { Candle, Trade } from './types/index.js';
+import { strategyBuilder } from './strategies/strategyBuilder.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -482,36 +483,36 @@ app.post('/api/strategy-builder', async (req: Request, res: Response) => {
             time: candles.map(c => c.time),
         };
 
-        // const { results, totalCombinations } = strategyBuilder({
-        //     marketData,
-        //     perTradeAmount: Number(perTradeAmount),
-        //     feeRate: Number(feeRate),
-        //     useTrailingSL: Boolean(useTrailingSL),
-        // });
+        const { results, totalCombinations } = strategyBuilder({
+            marketData,
+            perTradeAmount: Number(perTradeAmount),
+            feeRate: Number(feeRate),
+            useTrailingSL: Boolean(useTrailingSL),
+        });
 
         // Return only top 200 results to keep response lean
-        // const slim = results.slice(0, 200).map((r: any) => ({
-        //     config: r.config,
-        //     totalTrades: r.totalTrades,
-        //     wins: r.wins,
-        //     losses: r.losses,
-        //     winRate: r.winRate,
-        //     totalPL: r.totalPL,
-        //     avgWin: r.avgWin,
-        //     avgLoss: r.avgLoss,
-        //     riskReward: r.riskReward,
-        // }));
+        const slim = results.slice(0, 200).map((r: any) => ({
+            config: r.config,
+            totalTrades: r.totalTrades,
+            wins: r.wins,
+            losses: r.losses,
+            winRate: r.winRate,
+            totalPL: r.totalPL,
+            avgWin: r.avgWin,
+            avgLoss: r.avgLoss,
+            riskReward: r.riskReward,
+        }));
 
-        // res.json({
-        //     results: slim,
-        //     totalCombinations,
-        //     testedCombinations: results.length,
-        //     pair,
-        //     month,
-        //     year,
-        //     resolution,
-        //     perTradeAmount,
-        // });
+        res.json({
+            results: slim,
+            totalCombinations,
+            testedCombinations: results.length,
+            pair,
+            month,
+            year,
+            resolution,
+            perTradeAmount,
+        });
 
     } catch (err: any) {
         console.error('Strategy builder error:', err.message);
