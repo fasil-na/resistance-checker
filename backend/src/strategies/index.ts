@@ -4,7 +4,7 @@ export interface Strategy {
     id: string;
     name: string;
     description: string;
-    run(candles: Candle[], params: Record<string, any>): Trade[];
+    run(candles: Candle[], params: Record<string, any>): { trades: Trade[], finalBalance: number };
 }
 
 import { OpeningBreakoutStrategy } from './OpeningBreakoutStrategy.js';

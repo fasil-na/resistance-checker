@@ -69,9 +69,9 @@ function avgVolume(volumes: number[], period = 20): number {
  * Fixed lot sizing:
  *   Units = perTradeAmount / entryPrice
  */
-function calcLotSize(perTradeAmount: number, entryPrice: number): number {
+function calcLotSize(perTradeAmount: number, entryPrice: number, leverage = 1): number {
     if (entryPrice <= 0) return 0;
-    return perTradeAmount / entryPrice;
+    return (perTradeAmount * leverage) / entryPrice;
 }
 
 // ── Interfaces ──────────────────────────────────────────────
@@ -125,17 +125,19 @@ interface StrategyResult {
  * Returns trade-level & summary metrics.
  */
 function runStrategyConfig({
-    marketData,     // { close[], high[], low[], volume[], time[] }
-    config,         // all filter params
+    marketData,
+    config,
     perTradeAmount,
     feeRate,
     useTrailingSL,
+    leverage = 1,
 }: {
     marketData: MarketData;
     config: StrategyConfig;
     perTradeAmount: number;
     feeRate: number;
     useTrailingSL: boolean;
+    leverage?: number;
 }): StrategyResult | null {
     const { close, high, low, volume, time } = marketData;
     const N = close.length;
@@ -144,6 +146,7 @@ function runStrategyConfig({
     if (N < warmup + 5) return null;
 
     let totalPL = 0;
+    let currentBalance = perTradeAmount; // Assume initial budget is perTradeAmount
     const trades: TradeResult[] = [];
     let position: {
         entry: number;
@@ -162,6 +165,11 @@ function runStrategyConfig({
             volume: volume.slice(0, i + 1),
         };
         const price = close[i]!;
+
+        // Bankruptcy Check
+        if (currentBalance <= 0) {
+            break;
+        }
 
         // ── Compute indicators ──
         const shortEMA = calcEMA(slice.close, config.emaShort).at(-1)!;
@@ -198,7 +206,9 @@ function runStrategyConfig({
                 const grossPnL = (exitPrice - position.entry) * position.units;
                 const fees = (position.entry * position.units + exitPrice * position.units) * feeRate;
                 const netPnL = grossPnL - fees;
+
                 totalPL += netPnL;
+                currentBalance += netPnL;
 
                 trades.push({
                     entryPrice: position.entry,
@@ -217,7 +227,7 @@ function runStrategyConfig({
         // ── Entry signal ──
         if (emaBullish && rsiOk && volHigh) {
             const stopLoss = price - atrVal * config.slMult;
-            const units = calcLotSize(perTradeAmount, price);
+            const units = calcLotSize(currentBalance, price, leverage);
             if (units > 0) {
                 position = {
                     entry: price,
@@ -282,11 +292,13 @@ export function strategyBuilder({
     perTradeAmount = 100,
     feeRate = 0.0002,
     useTrailingSL = true,
+    leverage = 1,
 }: {
     marketData: MarketData;
     perTradeAmount?: number;
     feeRate?: number;
     useTrailingSL?: boolean;
+    leverage?: number;
 }): { results: StrategyResult[]; totalCombinations: number } {
     const results: StrategyResult[] = [];
     let total = 0;
@@ -320,6 +332,7 @@ export function strategyBuilder({
                                         perTradeAmount,
                                         feeRate,
                                         useTrailingSL,
+                                        leverage,
                                     });
 
                                     if (result) results.push(result);

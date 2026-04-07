@@ -2,9 +2,9 @@ import type { Candle, Trade } from '../types/index.js';
 
 export interface LotSizingParams {
     capital: number;
-    riskPerTrade: number; // Percentage of capital to risk per trade (e.g. 1 for 1%)
     maxPositionSize?: number; // Max percentage of capital to use for a single position (e.g. 100 for 100%)
     feeRate: number;
+    leverage?: number; // Add leverage for futures
 }
 
 export function calculateUnits(
@@ -12,19 +12,15 @@ export function calculateUnits(
     stopLoss: number,
     params: LotSizingParams
 ): number {
-    const riskAmount = params.capital * (params.riskPerTrade / 100);
-    const riskPerUnit = Math.abs(entryPrice - stopLoss);
+    if (entryPrice <= 0) return 0;
 
-    if (riskPerUnit === 0) return 0;
+    // Direct Capital-based sizing (Compounding with Leverage)
+    // Units = (Capital * PositionSize% * Leverage) / EntryPrice
+    const effectiveCapital = params.capital * (params.leverage || 1);
+    const maxCapitalForTrade = effectiveCapital * ((params.maxPositionSize || 100) / 100);
+    const units = maxCapitalForTrade / entryPrice;
 
-    // Units based on risk
-    let units = riskAmount / riskPerUnit;
-
-    // Units based on max position size (capital constraint)
-    const maxCapitalForTrade = params.capital * ((params.maxPositionSize || 100) / 100);
-    const maxUnitsByCapital = maxCapitalForTrade / entryPrice;
-
-    return Math.min(units, maxUnitsByCapital);
+    return units;
 }
 
 export function calculateTradeProfit(
@@ -50,12 +46,11 @@ export function calculateTradeProfit(
 
 // export function calculatePositionSize({
 //     capital,
-//     riskPercent = 1,   // 1% risk
 //     entryPrice,
 //     stopLossPrice,
 //     feePercent = 0.001 // 0.1%
 // }) {
-//     const riskAmount = (capital * riskPercent) / 100;
+//     const riskAmount = (capital) / 100;
 
 //     const stopDistance = Math.abs(entryPrice - stopLossPrice);
 

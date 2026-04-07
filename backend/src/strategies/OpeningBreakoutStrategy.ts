@@ -13,18 +13,19 @@ export class OpeningBreakoutStrategy implements Strategy {
     name = 'Opening Breakout';
     description = 'Trades based on the high/low of an opening time window with EMA and ATR filters.';
 
-    run(candles: Candle[], params: Record<string, any>): Trade[] {
-        if (candles.length < 50) return [];
+    run(candles: Candle[], params: Record<string, any>): { trades: Trade[], finalBalance: number } {
+        if (candles.length < 50) return { trades: [], finalBalance: params.capital || 1000 };
 
         const {
             capital = 1000,
-            riskPerTrade = 1, // 1%
             maxPositionSize = 100, // 100%
-            atrMultiplierSL = 0.4,
+            atrMultiplierSL = 1,
             feeRate = 0.0002,
+            leverage = 1,
             simulationStartUnix = 0
         } = params;
 
+        let currentBalance = capital;
         const closes = candles.map(c => c.close);
         let allTrades: Trade[] = [];
         let currentTrade: Trade | null = null;
@@ -37,6 +38,13 @@ export class OpeningBreakoutStrategy implements Strategy {
         for (let i = 50; i < candles.length; i++) {
             const c = candles[i];
             if (!c || (simulationStartUnix && c.time < simulationStartUnix * 1000)) continue;
+
+            // Bankruptcy Check
+            if (currentBalance <= 0) {
+                console.log("BANKRUPTCY: Balance hit 0, stopping strategy.");
+                break;
+            }
+
             const time = dayjs(c.time).tz('Asia/Kolkata');
 
             if (!rangeHigh && !rangeLow) {
@@ -97,6 +105,10 @@ export class OpeningBreakoutStrategy implements Strategy {
                     currentTrade.fee = fee;
                     currentTrade.profit = profit;
                     allTrades.push(currentTrade);
+
+                    // Update Balance (Compounding)
+                    currentBalance += profit;
+
                     currentTrade = null;
                 }
                 continue;
@@ -118,10 +130,10 @@ export class OpeningBreakoutStrategy implements Strategy {
                 const sl = direction === 'buy' ? entry - atr * atrMultiplierSL : entry + atr * atrMultiplierSL;
 
                 const units = calculateUnits(entry, sl, {
-                    capital,
-                    riskPerTrade,
+                    capital: currentBalance, // Use currentBalance for compounding
                     maxPositionSize,
-                    feeRate
+                    feeRate,
+                    leverage
                 });
 
                 currentTrade = {
@@ -144,7 +156,7 @@ export class OpeningBreakoutStrategy implements Strategy {
             }
         }
 
-        return allTrades;
+        return { trades: allTrades, finalBalance: currentBalance };
     }
 
     private calculateEMA(data: number[], period: number, index: number): number {

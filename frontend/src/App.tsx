@@ -82,6 +82,7 @@ interface BacktestResponse {
     failedCount: number;
     winRate: number;
     initialCapital: number;
+    finalBalance: number;
   };
 }
 
@@ -142,6 +143,9 @@ export default function App() {
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [interval, setInterval] = useState("15");
+  const [liveBalance, setLiveBalance] = useState<number | null>(null);
+  const [isBankruptcy, setIsBankruptcy] = useState(false);
+  const [dynamicMaxLeverage, setDynamicMaxLeverage] = useState<number | null>(null);
 
   // Persistence Effects
   useEffect(() => {
@@ -158,8 +162,8 @@ export default function App() {
   }, [liveInterval]);
 
   // Lot Sizing State
-  const [riskPerTrade, setRiskPerTrade] = useState(1);
   const [maxPositionSize, setMaxPositionSize] = useState(100);
+  const [leverage, setLeverage] = useState(0);
   const [trailingSL, setTrailingSL] = useState(true);
 
   const [backtestResult, setBacktestResult] = useState<BacktestResponse | null>(
@@ -183,6 +187,7 @@ export default function App() {
   const [sbYear, setSbYear] = useState(new Date().getFullYear());
   const [sbInterval, setSbInterval] = useState("15");
   const [sbPerTradeAmount, setSbPerTradeAmount] = useState(100);
+  const [sbLeverage, setSbLeverage] = useState(0);
   const [sbUseTrailingSL, setSbUseTrailingSL] = useState(true);
   const [sbLoading, setSbLoading] = useState(false);
   const [sbResult, setSbResult] = useState<any | null>(null);
@@ -201,6 +206,7 @@ export default function App() {
         year: sbYear,
         resolution: sbInterval,
         perTradeAmount: sbPerTradeAmount,
+        leverage: sbLeverage,
         useTrailingSL: sbUseTrailingSL,
       });
       setSbResult(response.data);
@@ -302,6 +308,18 @@ export default function App() {
     }
   };
 
+  const fetchDynamicLeverage = async () => {
+    try {
+      const response = await axios.get<{ leverage: number }>(
+        `${API_BASE_URL}/leverage/${pair}`,
+      );
+      setDynamicMaxLeverage(response.data.leverage);
+    } catch (err) {
+      console.error("Leverage fetch failed:", err);
+      setDynamicMaxLeverage(null);
+    }
+  };
+
   const runBacktest = async () => {
     try {
       setIsBacktesting(true);
@@ -319,8 +337,8 @@ export default function App() {
           month: selectedMonth,
           year: selectedYear,
           capital: initialCapital,
-          riskPerTrade,
           maxPositionSize,
+          leverage,
           trailingSL,
           isLive: isLiveMonitoring,
           ...strategyParams,
@@ -346,8 +364,8 @@ export default function App() {
           resolutions: ["5", "15", "30"],
           atrMultipliers: [1, 2, 3, 4, 5],
           capital: initialCapital,
-          riskPerTrade,
           maxPositionSize,
+          leverage,
           trailingSL,
         },
       );
@@ -365,6 +383,7 @@ export default function App() {
 
   useEffect(() => {
     fetchMarketData();
+    fetchDynamicLeverage();
   }, [pair, isLiveMonitoring]);
 
   // Polling for Live Monitoring
@@ -377,11 +396,28 @@ export default function App() {
       fetchMarketData();
       fetchTicker();
 
+      // Fetch live balance for compounding/bankruptcy
+      const fetchInitialBalance = async () => {
+        try {
+          const res = await axios.post(`${API_BASE_URL}/user/balances`);
+          const inrBalance = res.data.find((b: any) => b.currency === "INR");
+          if (inrBalance) {
+            setLiveBalance(parseFloat(inrBalance.balance));
+            if (parseFloat(inrBalance.balance) <= 0) setIsBankruptcy(true);
+          }
+        } catch (err) {
+          console.error("fetchInitialBalance failed:", err);
+        }
+      };
+      fetchInitialBalance();
+
       // Poll candles every 10 seconds (heavy call)
       candleIntervalId = window.setInterval(() => {
         fetchMarketData();
 
         const runLiveStrategy = async () => {
+          if (isBankruptcy) return; // BANKRUPTCY CHECK
+
           try {
             const response = await axios.post<BacktestResponse>(
               `${API_BASE_URL}/backtest`,
@@ -389,7 +425,7 @@ export default function App() {
                 pair,
                 resolution: liveInterval,
                 strategyId: selectedStrategyId,
-                capitalPerTrade: initialCapital,
+                capitalPerTrade: (liveBalance !== null) ? liveBalance : initialCapital, // COMPOUNDING
                 isLive: true,
               },
             );
@@ -409,12 +445,22 @@ export default function App() {
 
                   // ONLY execute on exchange if Auto-Trade is ON
                   if (isLiveTrading) {
+                    // BEFORE Execution - check bankruptcy again
+                    if (((liveBalance !== null ? liveBalance : initialCapital)) <= 0) {
+                      setIsBankruptcy(true);
+                      alert("TERMINATED: Live strategy stopped due to zero/negative balance.");
+                      return;
+                    }
+
                     await axios.post(`${API_BASE_URL}/trade/execute`, {
                       side: latestTrade.direction === "buy" ? "buy" : "sell",
                       pair: pair.replace("B-", "").replace("_", ""),
                       price: latestTrade.entryPrice,
-                      capital: initialCapital,
+                      capital: liveBalance !== null ? liveBalance : initialCapital, // COMPOUNDING
                     });
+
+                    // After execution, refresh balance
+                    fetchInitialBalance();
                   }
                 }
               }
@@ -678,22 +724,25 @@ export default function App() {
                             className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
                           />
                         </InputGroup>
-                        <InputGroup label="Risk %" sub="Per trade">
-                          <input
-                            type="number"
-                            value={riskPerTrade}
-                            onChange={(e) =>
-                              setRiskPerTrade(Number(e.target.value))
-                            }
-                            className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
-                          />
-                        </InputGroup>
-                        <InputGroup label="Max Size %" sub="Of capital">
+                        <InputGroup label="Pos Size %" sub="Of capital">
                           <input
                             type="number"
                             value={maxPositionSize}
                             onChange={(e) =>
                               setMaxPositionSize(Number(e.target.value))
+                            }
+                            className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
+                          />
+                        </InputGroup>
+                        <InputGroup
+                          label="Leverage"
+                          sub={dynamicMaxLeverage ? `Max: ${dynamicMaxLeverage}x (Enter 0 for Max)` : "0 = Dynamic Max"}
+                        >
+                          <input
+                            type="number"
+                            value={leverage}
+                            onChange={(e) =>
+                              setLeverage(Number(e.target.value))
                             }
                             className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
                           />
@@ -909,12 +958,25 @@ export default function App() {
                             className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
                           />
                         </InputGroup>
-                        <InputGroup label="Risk %" sub="Per trade">
+                        <InputGroup label="Pos Size %" sub="Of capital">
                           <input
                             type="number"
-                            value={riskPerTrade}
+                            value={maxPositionSize}
                             onChange={(e) =>
-                              setRiskPerTrade(Number(e.target.value))
+                              setMaxPositionSize(Number(e.target.value))
+                            }
+                            className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
+                          />
+                        </InputGroup>
+                        <InputGroup
+                          label="Leverage"
+                          sub={dynamicMaxLeverage ? `Max: ${dynamicMaxLeverage}x (Enter 0 for Max)` : "0 = Dynamic Max"}
+                        >
+                          <input
+                            type="number"
+                            value={leverage}
+                            onChange={(e) =>
+                              setLeverage(Number(e.target.value))
                             }
                             className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white font-bold outline-none"
                           />
@@ -1038,6 +1100,16 @@ export default function App() {
                   className="space-y-8"
                 >
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                    <ResultCard
+                      title="Final Balance"
+                      value={`$${backtestResult.summary.finalBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                      icon={Database}
+                      color={
+                        backtestResult.summary.finalBalance >= backtestResult.summary.initialCapital
+                          ? "text-emerald-400"
+                          : "text-rose-400"
+                      }
+                    />
                     <ResultCard
                       title="Total P/L"
                       value={`$${backtestResult.summary.totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
@@ -1353,7 +1425,6 @@ export default function App() {
 
         {view === "strategy-builder" && (
           <StrategyBuilderView
-            pair={pair}
             sbMonth={sbMonth}
             setSbMonth={setSbMonth}
             sbYear={sbYear}
@@ -1362,6 +1433,8 @@ export default function App() {
             setSbInterval={setSbInterval}
             sbPerTradeAmount={sbPerTradeAmount}
             setSbPerTradeAmount={setSbPerTradeAmount}
+            sbLeverage={sbLeverage}
+            setSbLeverage={setSbLeverage}
             sbUseTrailingSL={sbUseTrailingSL}
             setSbUseTrailingSL={setSbUseTrailingSL}
             sbLoading={sbLoading}
@@ -1372,6 +1445,7 @@ export default function App() {
             sbSortDir={sbSortDir}
             handleSbSort={handleSbSort}
             runStrategyBuilder={runStrategyBuilder}
+            dynamicMaxLeverage={dynamicMaxLeverage}
           />
         )}
 
@@ -1393,6 +1467,11 @@ export default function App() {
                   <span className="text-slate-500 text-[10px] font-bold uppercase tracking-widest leading-none">
                     Live Strategy Engine
                   </span>
+                  {isBankruptcy && (
+                    <span className="ml-4 px-2.5 py-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-[10px] font-black text-rose-400 uppercase tracking-widest animate-bounce">
+                      BANKRUPTCY TRIPPED
+                    </span>
+                  )}
                 </div>
                 <h1 className="text-4xl md:text-5xl font-black tracking-tighter bg-gradient-to-br from-white via-slate-200 to-emerald-500 bg-clip-text text-transparent">
                   Live Trade Console
@@ -1425,6 +1504,14 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-6">
+                {liveBalance !== null && (
+                  <div className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-blue-500/10 border border-blue-500/20">
+                    <Database className="w-3.5 h-3.5 text-blue-400" />
+                    <span className="text-xs font-black text-blue-400 font-mono">
+                      {liveBalance.toLocaleString()} INR
+                    </span>
+                  </div>
+                )}
                 {tickerPrice && (
                   <div className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
                     <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -1589,6 +1676,14 @@ export default function App() {
                             )}
                           >
                             ${backtestResult.summary.totalProfit.toFixed(1)}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-[8px] font-black text-slate-500 uppercase">
+                            Final Balance
+                          </p>
+                          <p className="text-[10px] font-bold text-white">
+                            ${backtestResult.summary.finalBalance.toFixed(1)}
                           </p>
                         </div>
                       </div>
@@ -2521,7 +2616,6 @@ function SbSortIcon({
 }
 
 function StrategyBuilderView({
-  pair,
   sbMonth,
   setSbMonth,
   sbYear,
@@ -2530,6 +2624,8 @@ function StrategyBuilderView({
   setSbInterval,
   sbPerTradeAmount,
   setSbPerTradeAmount,
+  sbLeverage,
+  setSbLeverage,
   sbUseTrailingSL,
   setSbUseTrailingSL,
   sbLoading,
@@ -2540,6 +2636,7 @@ function StrategyBuilderView({
   sbSortDir,
   handleSbSort,
   runStrategyBuilder,
+  dynamicMaxLeverage,
 }: any) {
   const profitableCount =
     sbResult?.results?.filter((r: any) => r.totalPL > 0).length ?? 0;
@@ -2636,7 +2733,7 @@ function StrategyBuilderView({
           <h2 className="text-lg font-black tracking-tight">Configuration</h2>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6">
           <div className="space-y-2">
             <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">
               Month
@@ -2700,6 +2797,19 @@ function StrategyBuilderView({
               value={sbPerTradeAmount}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 setSbPerTradeAmount(Number(e.target.value))
+              }
+              className={inputCls}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">
+              Leverage {dynamicMaxLeverage ? `(Max: ${dynamicMaxLeverage}x)` : "(0=Max)"}
+            </label>
+            <input
+              type="number"
+              value={sbLeverage}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                setSbLeverage(Number(e.target.value))
               }
               className={inputCls}
             />

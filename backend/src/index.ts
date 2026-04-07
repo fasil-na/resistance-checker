@@ -35,6 +35,25 @@ function createSignature(payload: any, secret: string) {
     return signature;
 }
 
+// Fetch dynamic leverage for futures
+async function getInstrumentLeverage(pair: string): Promise<number> {
+    try {
+        const url = `https://api.coindcx.com/exchange/v1/derivatives/futures/data/instrument?pair=${pair}&margin_currency_short_name=USDT`;
+        const response = await axios.get(url);
+        if (response.data && response.data.instrument) {
+            // Priority to max_leverage_long, fallback to 1
+            const lev = response.data.instrument.max_leverage_long || 1;
+            console.log(`Dynamic leverage for ${pair}: ${lev}x`);
+            return lev;
+        }
+        return 1;
+    } catch (error) {
+        // Fallback to 1 if API fails
+        console.error(`Failed to fetch leverage for ${pair}:`, error);
+        return 1;
+    }
+}
+
 app.post('/api/trade/execute', async (req: Request, res: Response) => {
     try {
         const apiKey = process.env.COINDCX_API_KEY;
@@ -47,26 +66,33 @@ app.post('/api/trade/execute', async (req: Request, res: Response) => {
 
         // Fetch market details to get precision
         const marketDetailsResponse = await axios.get('https://apigw.coindcx.com/exchange/v1/markets_details');
-        const marketDetails = marketDetailsResponse.data.find((m: any) => m.coindcx_name === 'DOGEINR');
+        const marketDetails = marketDetailsResponse.data.find((m: any) => m.coindcx_name === (pair || 'DOGEINR'));
 
         console.log(marketDetails, 'marketDetails------')
 
         if (!marketDetails) {
-            return res.status(404).json({ error: 'Market details not found for DOGEINR' });
+            return res.status(404).json({ error: `Market details not found for ${pair || 'DOGEINR'}` });
         }
 
         const targetPrecision = marketDetails.target_currency_precision;
         const basePrecision = marketDetails.base_currency_precision;
 
-        // Lot sizing: Static values for DOGEINR trade with dynamic precision
-        const quantity = (12).toFixed(targetPrecision).toString();
-        const newPrice = (8.5).toFixed(basePrecision).toString();
+        // Bankruptcy & Compounding logic
+        if (capital <= 0) {
+            return res.status(400).json({ error: 'Insufficient capital (Bankruptcy)' });
+        }
+
+        // Calculate quantity based on capital for compounding
+        // In a real scenario, you'd also consider riskPerTrade here if passed
+        const quantityNum = capital / parseFloat(price || "1");
+        const quantity = quantityNum.toFixed(targetPrecision).toString();
+
         const timeStamp = Date.now();
         const body = {
             side,
             order_type: "market_order",
-            market: 'DOGEINR',
-            price_per_unit: newPrice,
+            market: pair || 'DOGEINR',
+            price_per_unit: price, // Use the passed price
             total_quantity: quantity,
             timestamp: timeStamp,
             client_order_id: `T-${timeStamp}`
@@ -157,6 +183,7 @@ app.get('/api/strategies', (_req: Request, res: Response) => {
 app.get('/api/market-data', async (req: Request, res: Response) => {
     try {
         const { pair = 'B-BTC_USDT', resolution = '60', from, to } = req.query;
+        console.log("🚀 ~ pair:", pair)
 
         // Ensure we always use live data unless explicitly requested otherwise for dev
         const useDummy = req.query.useDummy === 'true';
@@ -203,6 +230,16 @@ app.get('/api/ticker', async (req: Request, res: Response) => {
     }
 });
 
+app.get('/api/leverage/:pair', async (req: Request, res: Response) => {
+    try {
+        const { pair } = req.params;
+        const leverage = await getInstrumentLeverage(pair as string);
+        res.json({ leverage });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch leverage' });
+    }
+});
+
 
 app.post('/api/backtest', async (req: Request, res: Response) => {
     try {
@@ -223,6 +260,14 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
             feeRate = 0.0002
         } = req.body;
 
+        // Dynamic Leverage
+        let leverage = req.body.leverage;
+        if (!leverage || leverage <= 0) {
+            leverage = await getInstrumentLeverage(pair);
+        }
+
+        let currentCapital = req.body.capital || req.body.capitalPerTrade || 1000;
+        const initialCapital = currentCapital;
         let allTrades: Trade[] = [];
         let periods: { year: number, month: number }[] = [];
 
@@ -276,11 +321,19 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
                     const strategy = strategies[strategyId];
 
                     if (strategy) {
-                        const trades = strategy.run(candles, {
+                        const { trades, finalBalance } = strategy.run(candles, {
                             ...req.body,
+                            leverage, // Override with dynamic leverage
+                            capital: currentCapital, // Pass current balance for compounding
                             simulationStartUnix
                         });
                         allTrades.push(...trades);
+                        currentCapital = finalBalance; // Update balance for next period/trade
+
+                        if (currentCapital <= 0) {
+                            console.log("Backtest BANKRUPTCY: Stopping simulation.");
+                            break;
+                        }
                     }
                 }
             } catch (err) {
@@ -295,7 +348,8 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
             successCount: allTrades.filter(t => t.profit > 0).length,
             failedCount: allTrades.filter(t => t.profit <= 0).length,
             winRate: allTrades.length > 0 ? (allTrades.filter(t => t.profit > 0).length / allTrades.length) * 100 : 0,
-            initialCapital: req.body.capital || req.body.capitalPerTrade || 1000
+            initialCapital,
+            finalBalance: currentCapital
         };
 
         res.json({ trades: allTrades, summary });
@@ -314,6 +368,8 @@ app.post('/api/backtest/optimize', async (req: Request, res: Response) => {
         const resolutions: string[] = req.body.resolutions || ["5", "15", "30"];
         const atrMultipliers: number[] = req.body.atrMultipliers || [1, 2, 3, 4, 5];
         const feeRate: number = req.body.feeRate || 0.0002;
+
+        const leverage = await getInstrumentLeverage(pair);
 
         const capitalPerTrade = 1;
         const now = dayjs();
@@ -370,8 +426,10 @@ app.post('/api/backtest/optimize', async (req: Request, res: Response) => {
                     if (!strategy) continue;
 
                     for (const atrMultiplierSL of atrMultipliers) {
-                        const trades = strategy.run(candles, {
+                        const { trades, finalBalance } = strategy.run(candles, {
                             ...req.body,
+                            leverage, // Use dynamic leverage
+                            capital: 1000, // For optimization we might want to keep it consistent or follow same logic
                             resolution,
                             atrMultiplierSL,
                             simulationStartUnix
@@ -454,7 +512,10 @@ app.post('/api/strategy-builder', async (req: Request, res: Response) => {
             perTradeAmount = 100,
             feeRate = 0.0002,
             useTrailingSL = true,
+            leverage: reqLeverage,
         } = req.body;
+
+        const leverage = (!reqLeverage || reqLeverage <= 0) ? await getInstrumentLeverage(pair) : reqLeverage;
 
         // Build the unix range for the requested month
         const monthStart = dayjs().year(Number(year)).month(Number(month)).startOf('month');
@@ -488,6 +549,7 @@ app.post('/api/strategy-builder', async (req: Request, res: Response) => {
             perTradeAmount: Number(perTradeAmount),
             feeRate: Number(feeRate),
             useTrailingSL: Boolean(useTrailingSL),
+            leverage: Number(leverage),
         });
 
         // Return only top 200 results to keep response lean
@@ -512,6 +574,7 @@ app.post('/api/strategy-builder', async (req: Request, res: Response) => {
             year,
             resolution,
             perTradeAmount,
+            leverage,
         });
 
     } catch (err: any) {
