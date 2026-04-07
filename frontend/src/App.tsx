@@ -1213,7 +1213,7 @@ export default function App() {
                                                       trade.exitReason === "TP"
                                                         ? "text-emerald-500"
                                                         : trade.exitReason ===
-                                                            "SL"
+                                                          "SL"
                                                           ? "text-rose-500"
                                                           : "text-slate-500",
                                                     )}
@@ -1406,6 +1406,7 @@ export default function App() {
                     "B-ETH_USDT",
                     "B-DOGE_USDT",
                     "B-SHIB_USDT",
+                    "B-XAU_USDT",
                   ].map((p) => (
                     <button
                       key={p}
@@ -1608,7 +1609,7 @@ export default function App() {
                           className={cn(
                             "flex items-center justify-between text-[10px] font-mono py-2 border-b border-white/5 last:border-0 cursor-pointer hover:bg-white/5 px-2 rounded-lg transition-colors",
                             selectedTradeForChart === trade &&
-                              "bg-blue-500/10 border-blue-500/20",
+                            "bg-blue-500/10 border-blue-500/20",
                           )}
                         >
                           <div className="flex flex-col">
@@ -1673,8 +1674,8 @@ export default function App() {
                 {/* Active Trade Card */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                   {!backtestResult ||
-                  backtestResult.trades.filter((t) => t.status === "open")
-                    .length === 0 ? (
+                    backtestResult.trades.filter((t) => t.status === "open")
+                      .length === 0 ? (
                     <div className="md:col-span-2 p-12 border-2 border-dashed border-white/5 rounded-[2.5rem] flex flex-col items-center justify-center text-slate-600">
                       <div className="w-16 h-16 rounded-full bg-slate-900 flex items-center justify-center mb-4">
                         <Zap className="w-8 h-8 opacity-20" />
@@ -2552,24 +2553,24 @@ function StrategyBuilderView({
     numeric?: boolean;
     configKey?: string;
   }[] = [
-    { key: "rank", label: "#" },
-    { key: "emaShort", label: "EMA S", configKey: "emaShort" },
-    { key: "emaLong", label: "EMA L", configKey: "emaLong" },
-    { key: "rsiPeriod", label: "RSI P", configKey: "rsiPeriod" },
-    { key: "rsiThreshold", label: "RSI Min", configKey: "rsiThreshold" },
-    { key: "volMultiplier", label: "Vol×", configKey: "volMultiplier" },
-    { key: "atrPeriod", label: "ATR P", configKey: "atrPeriod" },
-    { key: "slMult", label: "SL ×", configKey: "slMult" },
-    { key: "trailingSLMult", label: "Trail×", configKey: "trailingSLMult" },
-    { key: "totalTrades", label: "Trades", numeric: true },
-    { key: "wins", label: "Wins", numeric: true },
-    { key: "losses", label: "Loss", numeric: true },
-    { key: "winRate", label: "Win %", numeric: true },
-    { key: "totalPL", label: "Total P/L", numeric: true },
-    { key: "avgWin", label: "Avg Win", numeric: true },
-    { key: "avgLoss", label: "Avg Loss", numeric: true },
-    { key: "riskReward", label: "R:R", numeric: true },
-  ];
+      { key: "rank", label: "#" },
+      { key: "emaShort", label: "EMA S", configKey: "emaShort" },
+      { key: "emaLong", label: "EMA L", configKey: "emaLong" },
+      { key: "rsiPeriod", label: "RSI P", configKey: "rsiPeriod" },
+      { key: "rsiThreshold", label: "RSI Min", configKey: "rsiThreshold" },
+      { key: "volMultiplier", label: "Vol×", configKey: "volMultiplier" },
+      { key: "atrPeriod", label: "ATR P", configKey: "atrPeriod" },
+      { key: "slMult", label: "SL ×", configKey: "slMult" },
+      { key: "trailingSLMult", label: "Trail×", configKey: "trailingSLMult" },
+      { key: "totalTrades", label: "Trades", numeric: true },
+      { key: "wins", label: "Wins", numeric: true },
+      { key: "losses", label: "Loss", numeric: true },
+      { key: "winRate", label: "Win %", numeric: true },
+      { key: "totalPL", label: "Total P/L", numeric: true },
+      { key: "avgWin", label: "Avg Win", numeric: true },
+      { key: "avgLoss", label: "Avg Loss", numeric: true },
+      { key: "riskReward", label: "R:R", numeric: true },
+    ];
 
   return (
     <motion.div
@@ -2967,7 +2968,7 @@ function StrategyBuilderView({
                         className={cn(
                           "px-4 py-4 whitespace-nowrap select-none",
                           col.key !== "rank" &&
-                            "cursor-pointer hover:text-violet-300 transition-colors",
+                          "cursor-pointer hover:text-violet-300 transition-colors",
                           col.numeric && "text-right",
                         )}
                       >
