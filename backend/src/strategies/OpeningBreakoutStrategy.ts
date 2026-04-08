@@ -13,7 +13,7 @@ export class OpeningBreakoutStrategy implements Strategy {
     name = 'Opening Breakout';
     description = 'Trades based on the high/low of an opening time window with EMA and ATR filters.';
 
-    run(candles: Candle[], params: Record<string, any>): { trades: Trade[], finalBalance: number } {
+    run(candles: Candle[], params: Record<string, any>, subCandles: Candle[] = []): { trades: Trade[], finalBalance: number } {
         if (candles.length < 50) return { trades: [], finalBalance: params.capital || 1000 };
 
         const {
@@ -34,6 +34,7 @@ export class OpeningBreakoutStrategy implements Strategy {
         let waiting = false;
         let direction: 'buy' | 'sell' | null = null;
         let lastBreakoutTime: string | null = null;
+        let subIdx = 0;
 
         for (let i = 50; i < candles.length; i++) {
             const c = candles[i];
@@ -68,48 +69,71 @@ export class OpeningBreakoutStrategy implements Strategy {
             if (Math.abs(c.close - ema20) < 10) continue;
 
             if (currentTrade) {
+                const trade = currentTrade; // Local refinement for TS
                 const { trailingSL = true } = params;
-                if (currentTrade.direction === 'buy') {
-                    if (trailingSL) {
-                        const lastHigh = currentTrade.lastHigh ?? currentTrade.entryPrice;
-                        if (c.high > lastHigh) {
-                            const move = c.high - lastHigh;
-                            currentTrade.sl! += move;
-                            currentTrade.lastHigh = c.high;
-                        }
-                    }
-                    if (c.close <= currentTrade.sl!) {
-                        currentTrade.exitPrice = currentTrade.sl!;
-                        currentTrade.exitReason = 'SL';
-                        currentTrade.status = 'closed';
-                    }
-                } else {
-                    if (trailingSL) {
-                        const lastLow = currentTrade.lastLow ?? currentTrade.entryPrice;
-                        if (c.low < lastLow) {
-                            const move = lastLow - c.low;
-                            currentTrade.sl! -= move;
-                            currentTrade.lastLow = c.low;
-                        }
-                    }
-                    if (c.close >= currentTrade.sl!) {
-                        currentTrade.exitPrice = currentTrade.sl!;
-                        currentTrade.exitReason = 'SL';
-                        currentTrade.status = 'closed';
-                    }
+
+                // Sync subIdx to current candle start
+                while (subIdx < subCandles.length && subCandles[subIdx]!.time < c.time) {
+                    subIdx++;
                 }
 
-                if (currentTrade.status === 'closed') {
-                    currentTrade.exitTime = time.toISOString();
-                    const { profit, fee } = calculateTradeProfit(currentTrade, currentTrade.exitPrice!, feeRate);
-                    currentTrade.fee = fee;
-                    currentTrade.profit = profit;
-                    allTrades.push(currentTrade);
+                // Get sub-candles for this period (e.g. the 15 1m candles inside this 15m candle)
+                const nextCandleTime = candles[i + 1] ? candles[i + 1]!.time : c.time + 3600000; // fallback 1h
+                const currentSubCandles: Candle[] = [];
+                while (subIdx < subCandles.length && subCandles[subIdx]!.time < nextCandleTime) {
+                    currentSubCandles.push(subCandles[subIdx]!);
+                    subIdx++;
+                }
 
-                    // Update Balance (Compounding)
-                    currentBalance += profit;
+                // If no sub-candles, fallback to using the main candle itself
+                const simulationPass = currentSubCandles.length > 0 ? currentSubCandles : [c];
 
-                    currentTrade = null;
+                for (const sc of simulationPass) {
+                    const scTime = dayjs(sc.time).tz('Asia/Kolkata');
+
+                    if (trade.direction === 'buy') {
+                        if (trailingSL) {
+                            const lastHigh = trade.lastHigh ?? trade.entryPrice;
+                            if (sc.high > lastHigh) {
+                                const move = sc.high - lastHigh;
+                                trade.sl = (trade.sl || trade.entryPrice) + move;
+                                trade.lastHigh = sc.high;
+                            }
+                        }
+                        // Check SL on 1m Low (more realistic liquidation)
+                        if (trade.sl !== undefined && sc.low <= trade.sl) {
+                            trade.exitPrice = trade.sl;
+                            trade.exitReason = 'SL (1m)';
+                            trade.status = 'closed';
+                            trade.exitTime = scTime.toISOString();
+                        }
+                    } else {
+                        if (trailingSL) {
+                            const lastLow = trade.lastLow ?? trade.entryPrice;
+                            if (sc.low < lastLow) {
+                                const move = lastLow - sc.low;
+                                trade.sl = (trade.sl || trade.entryPrice) - move;
+                                trade.lastLow = sc.low;
+                            }
+                        }
+                        // Check SL on 1m High
+                        if (trade.sl !== undefined && sc.high >= trade.sl) {
+                            trade.exitPrice = trade.sl;
+                            trade.exitReason = 'SL (1m)';
+                            trade.status = 'closed';
+                            trade.exitTime = scTime.toISOString();
+                        }
+                    }
+
+                    if (trade.status === 'closed') {
+                        const { profit, fee } = calculateTradeProfit(trade, trade.exitPrice!, feeRate);
+                        trade.fee = fee;
+                        trade.profit = profit;
+                        allTrades.push(trade);
+                        currentBalance += profit;
+                        currentTrade = null;
+                        break; // Exit the sub-candle loop
+                    }
                 }
                 continue;
             }

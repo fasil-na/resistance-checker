@@ -7,6 +7,7 @@ import React, {
 } from "react";
 import axios from "axios";
 import dayjs from "dayjs";
+import { io } from "socket.io-client";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   createChart,
@@ -117,9 +118,105 @@ interface Strategy {
 }
 
 const API_BASE_URL = "http://localhost:5001/api";
+const SOCKET_URL = "http://localhost:5001";
+const socket = io(SOCKET_URL, { autoConnect: false });
+
+function PaperTradeHistoryView() {
+  const [trades, setTrades] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchTrades();
+  }, []);
+
+  const fetchTrades = async () => {
+    try {
+      setLoading(true);
+      const { data } = await axios.get(`${API_BASE_URL}/paper-trades`);
+      setTrades(data);
+    } catch (err) {
+      console.error("Failed to fetch paper trades", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="space-y-8"
+    >
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-3xl font-black text-white">Paper Trade History</h2>
+          <p className="text-sm text-slate-500 font-bold uppercase tracking-widest mt-1">
+            Simulated Executions Log
+          </p>
+        </div>
+        <button onClick={fetchTrades} className="px-5 py-3 rounded-xl bg-slate-900 border border-white/5 hover:bg-slate-800 transition active:scale-95 flex items-center gap-2 text-xs font-black uppercase tracking-widest text-slate-300">
+          <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
+          Reload
+        </button>
+      </div>
+
+      <div className="bg-slate-900/40 border border-white/10 rounded-[2.5rem] overflow-hidden">
+        <div className="px-8 py-6 border-b border-white/5 flex items-center justify-between">
+          <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">
+            Recorded Trades List ({trades.length})
+          </h3>
+        </div>
+        <div className="max-h-[600px] overflow-y-auto">
+          {trades.length === 0 ? (
+            <div className="p-12 text-center text-slate-500 font-bold uppercase tracking-widest text-xs">
+              No Paper Trades Recorded Yet
+            </div>
+          ) : (
+            <table className="w-full text-left">
+              <thead>
+                <tr className="text-[10px] font-black uppercase tracking-widest text-slate-600 bg-slate-950/40">
+                  <th className="px-8 py-5">Date / Time</th>
+                  <th className="px-5 py-5">Pair</th>
+                  <th className="px-5 py-5">Type / Price</th>
+                  <th className="px-5 py-5 text-right">Profit</th>
+                  <th className="px-10 py-5 text-center">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {[...trades].sort((a, b) => new Date(b.recordedAt).getTime() - new Date(a.recordedAt).getTime()).map(t => (
+                  <tr key={t.id || t.recordedAt} className="bg-slate-900/20 hover:bg-slate-800/40 transition-colors">
+                    <td className="px-8 py-4">
+                      <div className="text-sm font-bold text-white">{dayjs(t.recordedAt).format("MMM D, YYYY")}</div>
+                      <div className="text-[10px] text-slate-500">{dayjs(t.recordedAt).format("HH:mm:ss")}</div>
+                    </td>
+                    <td className="px-5 py-4 text-xs font-bold text-slate-300">{t.pair}</td>
+                    <td className="px-5 py-4">
+                      <div className={cn("text-xs font-black uppercase", t.direction === 'buy' ? 'text-emerald-400' : 'text-rose-400')}>{t.direction}</div>
+                      <div className="text-[10px] text-slate-400">${t.entryPrice?.toFixed(2)}</div>
+                    </td>
+                    <td className="px-5 py-4 text-right">
+                      <span className={cn("text-sm font-black", t.profit >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                        {t.profit >= 0 ? '+' : ''}{t.profit?.toFixed(2)}
+                      </span>
+                    </td>
+                    <td className="px-10 py-4 text-center">
+                      <span className={cn("px-2 py-1 rounded-md text-[9px] font-black uppercase tracking-widest", t.status === 'open' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' : 'bg-slate-800 text-slate-400 border border-white/5')}>
+                        {t.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
 
 export default function App() {
-  const [view, setView] = useState<"backtest" | "trade" | "strategy-builder">(
+  const [view, setView] = useState<"backtest" | "trade" | "strategy-builder" | "paper-history">(
     "trade",
   );
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -135,8 +232,15 @@ export default function App() {
   const [liveInterval, setLiveInterval] = useState(
     () => localStorage.getItem("trade_interval") || "60",
   );
-  const [isLiveMonitoring, setIsLiveMonitoring] = useState(false);
-  const [isLiveTrading, setIsLiveTrading] = useState(false);
+  const [isLiveMonitoring, setIsLiveMonitoring] = useState(
+    () => localStorage.getItem("trade_live_monitor") === "true"
+  );
+  const [isLiveTrading, setIsLiveTrading] = useState(
+    () => localStorage.getItem("trade_live_trading") === "true"
+  );
+  const [isPaperTrading, setIsPaperTrading] = useState(
+    () => localStorage.getItem("trade_paper_trading") === "true"
+  );
   const [tickerPrice, setTickerPrice] = useState<number | null>(null);
 
   // Common Backtest State (Restored)
@@ -160,6 +264,15 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("trade_interval", liveInterval);
   }, [liveInterval]);
+  useEffect(() => {
+    localStorage.setItem("trade_live_monitor", isLiveMonitoring.toString());
+  }, [isLiveMonitoring]);
+  useEffect(() => {
+    localStorage.setItem("trade_live_trading", isLiveTrading.toString());
+  }, [isLiveTrading]);
+  useEffect(() => {
+    localStorage.setItem("trade_paper_trading", isPaperTrading.toString());
+  }, [isPaperTrading]);
 
   // Lot Sizing State
   const [maxPositionSize, setMaxPositionSize] = useState(100);
@@ -396,6 +509,36 @@ export default function App() {
       fetchMarketData();
       fetchTicker();
 
+      // Setup WebSocket Link
+      if (!socket.connected) {
+        socket.connect();
+      }
+      socket.emit("subscribe", pair);
+
+      const handlePriceChange = (data: any) => {
+        const rawPrice = data.p || data.price || data.last_price;
+        if (rawPrice && (!data.m || data.m === pair)) {
+          const price = parseFloat(rawPrice);
+          setTickerPrice(price);
+          setCandles((prev) => {
+            if (prev.length === 0) return prev;
+            const newCandles = [...prev];
+            const last = { ...newCandles[0] };
+            last.close = price;
+            if (price > last.high) last.high = price;
+            if (price < last.low) last.low = price;
+            newCandles[0] = last;
+            return newCandles;
+          });
+        }
+      };
+
+      socket.on("price-change", handlePriceChange);
+      socket.on("candlestick", (data) => {
+        // Candlestick websocket updates
+        // For now ticker price pushes live chart nicely
+      });
+
       // Fetch live balance for compounding/bankruptcy
       const fetchInitialBalance = async () => {
         try {
@@ -443,6 +586,14 @@ export default function App() {
                   }
                   lastAlertedTradeRef.current = tradeId;
 
+                  // Paper Trading Execution
+                  if (isPaperTrading) {
+                    axios.post(`${API_BASE_URL}/paper-trade`, {
+                      trade: latestTrade,
+                      pair: pair
+                    }).catch(err => console.error("Paper trade record failed:", err));
+                  }
+
                   // ONLY execute on exchange if Auto-Trade is ON
                   if (isLiveTrading) {
                     // BEFORE Execution - check bankruptcy again
@@ -470,7 +621,7 @@ export default function App() {
           }
         };
         runLiveStrategy();
-      }, 10000);
+      }, 60000);
 
       // Poll ticker every 1 second (light call)
       tickerIntervalId = window.setInterval(() => {
@@ -479,6 +630,9 @@ export default function App() {
     }
 
     return () => {
+      socket.off("price-change");
+      socket.off("candlestick");
+      socket.disconnect();
       if (candleIntervalId) clearInterval(candleIntervalId);
       if (tickerIntervalId) clearInterval(tickerIntervalId);
     };
@@ -490,6 +644,7 @@ export default function App() {
     selectedStrategyId,
     initialCapital,
     liveInterval,
+    isPaperTrading,
   ]);
 
   const tradesByDay = useMemo(() => {
@@ -565,6 +720,12 @@ export default function App() {
               onClick={() => setView("strategy-builder")}
               icon={FlaskConical}
               label="Strategy Builder"
+            />
+            <ViewToggle
+              active={view === "paper-history"}
+              onClick={() => setView("paper-history")}
+              icon={Database}
+              label="Paper History"
             />
           </div>
 
@@ -1566,6 +1727,22 @@ export default function App() {
                           <div className="w-10 h-5 bg-slate-800 rounded-full peer peer-checked:bg-blue-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-5"></div>
                         </label>
                       </div>
+                      {isLiveMonitoring && (
+                        <div className="flex items-center justify-between p-4 bg-slate-950/50 rounded-2xl border border-white/5">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase">
+                            Paper Trade
+                          </span>
+                          <label className="relative inline-flex items-center cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={isPaperTrading}
+                              onChange={(e) => setIsPaperTrading(e.target.checked)}
+                              className="sr-only peer"
+                            />
+                            <div className="w-10 h-5 bg-slate-800 rounded-full peer peer-checked:bg-indigo-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-5"></div>
+                          </label>
+                        </div>
+                      )}
                       <div className="flex items-center justify-between p-4 bg-slate-950/50 rounded-2xl border border-white/5">
                         <span className="text-[10px] font-bold text-slate-400 uppercase">
                           Auto-Trade
@@ -1873,6 +2050,10 @@ export default function App() {
               </div>
             </div>
           </motion.div>
+        )}
+
+        {view === "paper-history" && (
+          <PaperTradeHistoryView />
         )}
       </main>
 

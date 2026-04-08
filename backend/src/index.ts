@@ -12,6 +12,16 @@ import { strategies } from './strategies/index.js';
 // import { strategyBuilder } from './strategies/strategyBuilder.js';
 import type { Candle, Trade } from './types/index.js';
 import { strategyBuilder } from './strategies/strategyBuilder.js';
+import { coinDCXSocket } from './services/CoinDCXSocketService.js';
+import http from 'http';
+import { Server } from 'socket.io';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PAPER_TRADES_FILE = path.join(__dirname, 'paperTrades.json');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -43,7 +53,6 @@ async function getInstrumentLeverage(pair: string): Promise<number> {
         if (response.data && response.data.instrument) {
             // Priority to max_leverage_long, fallback to 1
             const lev = response.data.instrument.max_leverage_long || 1;
-            console.log(`Dynamic leverage for ${pair}: ${lev}x`);
             return lev;
         }
         return 1;
@@ -183,7 +192,6 @@ app.get('/api/strategies', (_req: Request, res: Response) => {
 app.get('/api/market-data', async (req: Request, res: Response) => {
     try {
         const { pair = 'B-BTC_USDT', resolution = '60', from, to } = req.query;
-        console.log("🚀 ~ pair:", pair)
 
         // Ensure we always use live data unless explicitly requested otherwise for dev
         const useDummy = req.query.useDummy === 'true';
@@ -310,12 +318,21 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
             }
 
             try {
-                const response = await axios.get(COINDCX_URL, {
-                    params: { pair, from: dataFetchStartUnix, to: endUnix, resolution, pcode: 'f' }
-                });
+                // Fetch both main resolution and 1m resolution for SL precision
+                const [response, subResponse] = await Promise.all([
+                    axios.get(COINDCX_URL, {
+                        params: { pair, from: dataFetchStartUnix, to: endUnix, resolution, pcode: 'f' }
+                    }),
+                    axios.get(COINDCX_URL, {
+                        params: { pair, from: dataFetchStartUnix, to: endUnix, resolution: '1', pcode: 'f' }
+                    }).catch(() => ({ data: { s: 'error', data: [] } })) // Optional 1m data
+                ]);
 
                 if (response.data.s === 'ok' && Array.isArray(response.data.data)) {
                     const candles: Candle[] = response.data.data.sort((a: Candle, b: Candle) => a.time - b.time);
+                    const subCandles: Candle[] = Array.isArray(subResponse.data.data)
+                        ? subResponse.data.data.sort((a: Candle, b: Candle) => a.time - b.time)
+                        : [];
 
                     const strategyId = req.body.strategyId || 'opening-breakout';
                     const strategy = strategies[strategyId];
@@ -326,7 +343,7 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
                             leverage, // Override with dynamic leverage
                             capital: currentCapital, // Pass current balance for compounding
                             simulationStartUnix
-                        });
+                        }, subCandles);
                         allTrades.push(...trades);
                         currentCapital = finalBalance; // Update balance for next period/trade
 
@@ -357,6 +374,50 @@ app.post('/api/backtest', async (req: Request, res: Response) => {
     } catch (err: any) {
         console.error(err);
         res.status(500).json({ error: 'Backtest failed' });
+    }
+});
+
+// Paper Trade Endpoints
+app.post('/api/paper-trade', (req: Request, res: Response) => {
+    try {
+        const { trade, pair } = req.body;
+        if (!trade) {
+            return res.status(400).json({ error: 'Trade data is required' });
+        }
+
+        let paperTrades = [];
+        if (fs.existsSync(PAPER_TRADES_FILE)) {
+            const data = fs.readFileSync(PAPER_TRADES_FILE, 'utf-8');
+            paperTrades = JSON.parse(data);
+        }
+
+        const newTrade = {
+            ...trade,
+            pair: pair || 'B-BTC_USDT',
+            id: crypto.randomUUID(),
+            recordedAt: new Date().toISOString()
+        };
+
+        paperTrades.push(newTrade);
+        fs.writeFileSync(PAPER_TRADES_FILE, JSON.stringify(paperTrades, null, 2));
+
+        res.json({ success: true, trade: newTrade });
+    } catch (err: any) {
+        console.error('Error saving paper trade:', err);
+        res.status(500).json({ error: 'Failed to record paper trade' });
+    }
+});
+
+app.get('/api/paper-trades', (req: Request, res: Response) => {
+    try {
+        if (!fs.existsSync(PAPER_TRADES_FILE)) {
+            return res.json([]);
+        }
+        const data = fs.readFileSync(PAPER_TRADES_FILE, 'utf-8');
+        res.json(JSON.parse(data));
+    } catch (err: any) {
+        console.error('Error fetching paper trades:', err);
+        res.status(500).json({ error: 'Failed to fetch paper trades' });
     }
 });
 //find best combination 
@@ -584,6 +645,31 @@ app.post('/api/strategy-builder', async (req: Request, res: Response) => {
 });
 
 
-app.listen(PORT, () => {
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+io.on('connection', (socket) => {
+    console.log('Frontend connected to local socket:', socket.id);
+
+    socket.on('subscribe', (pair: string) => {
+        console.log(`Frontend requesting subscription to ${pair}`);
+        // We push the subscription request to the actual CoinDCX WebSocket service
+        // CoinDCX generally uses specific channel names, so we subscribe accordingly:
+        const channelName = pair.includes('B-') ? pair : `B-${pair}`;
+        coinDCXSocket.subscribe(channelName);
+    });
+});
+
+// Hook up internal socket forwarding
+coinDCXSocket.on('candlestick', (data) => {
+    io.emit('candlestick', data);
+});
+coinDCXSocket.on('price-change', (data) => {
+    io.emit('price-change', data);
+});
+
+coinDCXSocket.connect();
+
+server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
 });
